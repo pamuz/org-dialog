@@ -26,75 +26,46 @@ simulate that.
   (require 'url)
 #+end_src
 
-* Parsing org structure into prose/prompt/assistant sections
+* Chopping an org buffer into a collection of prose, prompt and assistant chunks
 #+begin_src emacs-lisp
-   (defun org-dialog--parse-blocks (pos)
-     "Parse dialogue blocks from buffer start to POS.
-   Returns ordered list of (TYPE . CONTENT) where TYPE is
-   `prose', `prompt', or `assistant'.  Consecutive prose entries
-   are merged.  Skips keywords and empty segments."
-     (let* (;; 'greater-element granularity: identifies paragraphs, special
-            ;; blocks, src blocks, example blocks - without recursing into
-            ;; their contents (we extract raw text anyway).
-            (tree (org-element-parse-buffer 'greater-element))
-            ;; Walk tree in document order, collecting context elements.
-            ;; org-element-map finds these at any depth (under headlines).
-            ;; nil returns are filtered automatically.
-            (raw (org-element-map tree '(paragraph special-block
-                                         src-block example-block)
-                   (lambda (el)
-                     (when (<= (org-element-property :end el) pos)
-                       (pcase (org-element-type el)
-                         ;; Prose paragraph -> user context
-                         ('paragraph
-                          (let ((text (string-trim
-                                       (buffer-substring-no-properties
-                                        (org-element-property :begin el)
-                                        (org-element-property :end el)))))
-                            (when (> (length text) 0)
-                              (cons 'prose text))))
-                         ;; Source block -> user context, wrapped in markdown fence
-                         ('src-block
-                          (let ((lang (or (org-element-property :language el) ""))
-                                (value (org-element-property :value el)))
-                            (when (and value (> (length (string-trim value)) 0))
-                              (cons 'prose
-                                    (concat "```" lang "\n"
-                                            (string-trim value)
-                                            "\n```")))))
-                         ;; Example block -> user context, wrapped in fence
-                         ('example-block
-                          (let ((value (org-element-property :value el)))
-                            (when (and value (> (length (string-trim value)) 0))
-                              (cons 'prose
-                                    (concat "```\n"
-                                            (string-trim value)
-                                            "\n```")))))
-                         ;; PROMPT or ASSISTANT special block
-                         ('special-block
-                          (let ((type-str (org-element-property :type el))
-                                (cb (org-element-property :contents-begin el))
-                                (ce (org-element-property :contents-end el)))
-                            (when (member (upcase type-str) '("PROMPT" "ASSISTANT"))
-                              (let ((content (and cb ce
-                                                 (string-trim
-                                                  (buffer-substring-no-properties cb ce)))))
-                                (when (and content (> (length content) 0))
-                                  (cons (if (string-equal-ignore-case type-str "PROMPT")
-                                            'prompt 'assistant)
-                                        content))))))))))))
-       ;; Merge consecutive prose entries so multiple paragraphs and code
-       ;; blocks between prompts become one user context message.
-       (let ((merged nil))
-         (dolist (entry raw)
-           (if (and (eq (car entry) 'prose)
-                    merged
-                    (eq (car (car merged)) 'prose))
-               ;; Previous entry was also prose - append with blank line
-               (setcar merged (cons 'prose
-                                    (concat (cdar merged) "\n\n" (cdr entry))))
-             (push entry merged)))
-         (nreverse merged))))
+    (defun org-dialog--parse-chunks (pos)
+      "Parse dialogue blocks from buffer start to POS.
+    Returns ordered list of (TYPE . CONTENT) where TYPE is
+    `prose', `prompt', or `assistant'."
+      (save-excursion
+        (goto-char (point-min))
+        (let ((result nil)
+              (prose-start (point-min))
+              (case-fold-search t))
+          (while (and ( <= (point) pos)
+  		(re-search-forward
+                  "^[ \t]*#\\+begin_\\(prompt\\|assistant\\)" pos t))
+            (let* ((block-type (downcase (match-string 1)))
+                   (begin-line-start (line-beginning-position)))
+              ;; Prose before this block
+              (when (< prose-start begin-line-start)
+                (let ((prose (string-trim
+                              (buffer-substring-no-properties
+                               prose-start begin-line-start))))
+                  (when (> (length prose) 0)
+                    (push (cons 'prose prose) result))))
+              ;; Content starts on the next line
+              (forward-line 1)
+              (let ((content-start (point)))
+                (if (re-search-forward
+                     (format "^[ \t]*#\\+end_%s" block-type) pos t)
+                    (let ((content-end (line-beginning-position)))
+                      (let ((content (string-trim
+                                      (buffer-substring-no-properties
+                                       content-start content-end))))
+                        (when (> (length content) 0)
+                          (push (cons (intern block-type) content) result)))
+                      ;; Next prose starts after end line
+                      (forward-line 1)
+                      (setq prose-start (point)))
+                  ;; No matching end found, skip
+                  (setq prose-start content-start)))))
+          (nreverse result))))
 #+end_src
 
 #+begin_src emacs-lisp :tangle no :wrap example :results value pp
@@ -129,20 +100,16 @@ simulate that.
   ,#+begin_prompt
   Multiply that by 5
   ,#+end_prompt")
-      (org-dialog--parse-blocks (point-max)))
+      (org-dialog--parse-chunks (point-max)))
 #+end_src
 
 #+RESULTS:
 #+begin_example
 ((prose
-  . "This is an example collaboration between human and AI to author an .org\ndocument together.\n\nInterpersed within the prose of the document the human can write\n=#+begin_prompt= blocks, with some prompt to AI inside.\n\nThe human then positions the pointer somewhere within the block and\nexecutes keychord ctrl-c ctrl-c, this sends the prompts to an AI, parses\nthe AI's response and puts the response right after the prompt block,\nwithin a =#+begin_assistant= block.")
-
- (prompt . "What is 2 + 2?")
-
- (assistant . "2 + 2 = 4")
-
- (prose . "```python\ndef add(a, b):\n    return a + b\n```")
-
+  . "#+TITLE: An example user of org-dialog\nThis is an example collaboration between human and AI to author an .org\ndocument together.\n\nInterpersed within the prose of the document the human can write\n=#+begin_prompt= blocks, with some prompt to AI inside.\n\nThe human then positions the pointer somewhere within the block and\nexecutes keychord ctrl-c ctrl-c, this sends the prompts to an AI, parses\nthe AI's response and puts the response right after the prompt block,\nwithin a =#+begin_assistant= block.\n\n* Conversation")
+ (prompt . "What is 2 + 2?") (assistant . "2 + 2 = 4")
+ (prose
+  . "#+begin_src python\ndef add(a, b):\n    return a + b\n#+end_src")
  (prompt . "Multiply that by 5"))
 #+end_example
 
@@ -188,6 +155,74 @@ Example:
  ((role . "user") (content . "Multiply that by 5")))
 #+end_example
 
+* ASSISTANT blocks
+** Writing an assitant block for a prompt block
+#+begin_src emacs-lisp
+  (defun org-dialog--write-assistant-block (content)
+    "Write some content inside an ASSISTANT block, right after a PROMPT block.
+  If an ASSISTANT block already exists it is replaced."
+    (let ((bounds (org-dialog--in-prompt-p)))
+      (unless bounds
+        (user-error "Not inside a #+BEGIN_PROMPT block"))
+      (save-excursion
+        (goto-char (cdr bounds))
+        (let ((case-fold-search t)
+  	    (insert-at nil))
+  	;; Check for existing assistant block immediately after.
+  	(save-excursion
+  	  (forward-line 1)
+  	  (skip-chars-forward " \t\n")
+  	  (when (looking-at "^[\t]*#\\+begin_assistant")
+  	    (setq insert-at (point))))
+  	(if insert-at
+  	    ;; replace content of existing assistant block
+  	    (progn
+  	      (goto-char insert-at)
+  	      (forward-line 1)
+  	      (let ((content-start (point)))
+  		(re-search-forward "^[\t]*#\\+end_assistant")
+  		(delete-region content-start (line-beginning-position))
+  		(goto-char content-start)
+  		(insert (org-dialog--escape-org content) "\n")))
+  	  (goto-char (cdr bounds))
+  	  (end-of-line)
+  	  (insert "\n\n#+begin_assistant\n"
+  		  (org-dialog--escape-org content)
+  		  "\n#+end_assistant"))))
+      (org-dialog--apply-overlays)))
+#+end_src
+
+Example:
+
+#+begin_src emacs-lisp :tangle no :wrap example :results output
+    (with-temp-buffer
+      (org-mode)
+      (org-dialog-mode 1)
+      (insert "# An example org dialog buffer
+    Some introductory text.
+
+    ,#+begin_prompt
+    What is literate programming?
+    ,#+end_prompt")
+      (forward-line -1)
+      (org-dialog--write-assistant-block "An old but powerful coding technique")
+      (princ (buffer-string)))
+#+end_src
+
+#+RESULTS:
+#+begin_example
+# An example org dialog buffer
+Some introductory text.
+
+,#+begin_prompt
+What is literate programming?
+,#+end_prompt
+
+,#+begin_assistant
+An old but powerful coding technique
+,#+end_assistant
+#+end_example
+
 * Execute inference
 #+begin_src emacs-lisp
   (defun org-dialog--infer (messages config callback error-callback)
@@ -227,7 +262,7 @@ Example:
                                             (alist-get 'message
                                                        (aref choices 0))))))
                  (if text
-                     (funcall cb text)
+                     (funcall cb text resp)
                    (funcall err-cb
                             (format "No content in response: %s"
                                     (buffer-substring (point) (point-max))))))
@@ -306,6 +341,14 @@ Sanity check - hits the endpoint synchronously:
      "^\\(\\*\\|#\\+\\)" ",\\1" text))
 #+end_src
 
+* Pretty-print JSON
+#+begin_src emacs-lisp
+  (defun org-dialog--pp-json (obj)
+    "Return OBJ as a pretty-printed JSON string."
+    (let ((json-encoding-pretty-print t))
+      (json-encode obj)))
+#+end_src
+
 * Execute a PROMPT block
 #+begin_src emacs-lisp
   (defun org-dialog-execute ()
@@ -315,8 +358,10 @@ Sanity check - hits the endpoint synchronously:
       (unless bounds
         (user-error "Not inside a #+BEGIN_PROMPT block"))
       (let* ((prompt-end (cdr bounds))
+  	   (params (org-dialog--prompt-params))
+  	   (debug-p (and params (string-match-p ":debug" params)))
   	   (config (org-dialog--config))
-  	   (blocks (org-dialog--parse-blocks prompt-end))
+  	   (blocks (org-dialog--parse-chunks prompt-end))
   	   (messages (org-dialog--blocks-to-messages blocks config))
   	   (buf (current-buffer))
   	   (inhibit-read-only t))
@@ -325,45 +370,27 @@ Sanity check - hits the endpoint synchronously:
         (message "org-dialog: inferring...")
         (funcall #'org-dialog--infer
   	       messages config
-  	       (lambda (text)
+  	       (lambda (text resp)
   		 (with-current-buffer buf
-  		   (let ((inhibit-read-only t))
-  		     (save-excursion
-  		       (goto-char prompt-end)
-  		       (let ((case-fold-search t)
-  			     (insert-at nil))
-  			 ;; Check for existing assistant block immediately after
-  			 (save-excursion
-  			   (forward-line 1)
-  			   (skip-chars-forward " \t\n")
-  			   (when (looking-at "^[\t]*#\\+begin_assistant")
-  			     (setq insert-at (point))))
-  			 (if insert-at
-  			     ;; replace content of existing assistant block
-  			     (progn
-  			       (goto-char insert-at)
-  			       (forward-line 1)
-  			       (let ((content-start (point)))
-  				 (re-search-forward "^[ \t]*#\\+end_assistant")
-  				 (delete-region content-start (line-beginning-position))
-  				 (goto-char content-start)
-  				 (insert (org-dialog--escape-org text) "\n")))
-  			   ;; Insert new assistant block
-  			   (goto-char prompt-end)
-  			   (end-of-line)
-  			   (insert "\n\n#+begin_assistant\n"
-  				   (org-dialog--escape-org text)
-  				   "\n#+end_assistant"))))
-  		     ; (org-dialog--apply-overlays)
-  		     (org-dialog--apply-overlays)
-  		     (setq buffer-read-only nil)
-  		     (message "org-dialog: done."))))
+  		   (let* ((inhibit-read-only t)
+  			  (output
+  			   (if debug-p
+  			       (concat text
+  				       "\n\n--- Request ---\n"
+  				       (org-dialog--pp-json
+  					`((model . ,(plist-get config :model))
+  					  (messages . ,(vconcat messages))))
+  				       "\n\n--- Response ---\n"
+  				       (org-dialog--pp-json resp))
+  			     text)))
+  		     (org-dialog--write-assistant-block output)
+  		     (setq buffer-read-only nil))))
   	       ;; Error callback
   	       (lambda (err)
   		 (with-current-buffer buf
   		   (let ((inhibit-read-only t))
   		     (setq buffer-read-only nil))
-  		   (message "org-dialog error: %s" err)))))))
+  		   (org-dialog--write-assistant-block err)))))))
 #+end_src
 
 * Utilities
@@ -469,6 +496,32 @@ In prompt: (13 . 57)
 In prompt: nil
 #+end_example
 
+** Parse prompt block parameters
+Extracts the text after =#+begin_prompt= on the same line. Used to
+detect per-block settings like =:debug=.
+
+#+begin_src emacs-lisp
+  (defun org-dialog--prompt-params ()
+    "Parse parameter string from the #+begin_prompt line containing point.
+  Returns the trimmed parameter string, or nil if none."
+    (save-excursion
+      (let ((case-fold-search t))
+        (when (re-search-backward "^[ \t]*#\\+begin_prompt\\(.*\\)" nil t)
+          (let ((params (string-trim (match-string 1))))
+            (when (> (length params) 0)
+              params))))))
+#+end_src
+
+Example - detects =:debug= on the prompt line:
+
+#+begin_src emacs-lisp :tangle no :wrap example :results output
+    (with-temp-buffer
+      (org-mode)
+      (insert "#+begin_prompt :debug\nWhat is 2+2?\n#+end_prompt")
+      (goto-char 30)
+      (princ (format "Params: %s\n" (org-dialog--prompt-params))))
+#+end_src
+
 * User experience Look and feel
 ** Different color for assisant block content
 #+begin_src emacs-lisp
@@ -543,36 +596,13 @@ What do you think of this project?
 #+end_prompt
 
 #+begin_assistant
-Notes.
-
-- Overall structure is coherent. Literate tests with with-temp-buffer are appropriate.
-- org-dialog--parse-blocks is the most complex part. Add unit tests for mixed nesting and headlines.
-- Keyword error typo: "No #+DIAG_MODEL:" should be "DIALOG_MODEL".
-- org-dialog--infer uses chat completions schema. Works for current endpoint but is brittle.
-- org-dialog-execute sets buffer-read-only twice. Simplify with unwind-protect.
-- org-dialog--escape-org should also handle leading commas already present.
-- Overlay application is correct but O(n) on whole buffer each run.
-- Consider making org-dialog--blocks-to-messages treat prose before first prompt as system or user explicitly.
+Solid design. Clear scope. Pragmatic org integration. Parsing and UX
+are sensible. Network layer is minimal but adequate. Needs tests and
+error hardening.
 #+end_assistant
 
 #+begin_prompt
-give me an improved version of the TOC (what you would name each section)
+So far I'm making this project work by having a gpt-5.2-chat model
+deployed in azure foundry that I route requests to. Could I make it
+work with litellm docker image?
 #+end_prompt
-
-#+begin_assistant
-Solid project.
-
-- Clear goal and good org integration.
-- Parsing approach is reasonable and testable.
-- Literate tests are well done.
-- Code is readable and idiomatic.
-
-Concerns.
-
-- parse-blocks complexity and edge cases need more tests.
-- Inference layer is tightly coupled to one API shape.
-- Error handling and read-only toggling need cleanup.
-- Performance may degrade on large buffers.
-
-Overall: promising, usable, needs hardening.
-#+end_assistant

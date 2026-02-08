@@ -9,73 +9,44 @@
 (require 'json)
 (require 'url)
 
-(defun org-dialog--parse-blocks (pos)
+(defun org-dialog--parse-chunks (pos)
   "Parse dialogue blocks from buffer start to POS.
 Returns ordered list of (TYPE . CONTENT) where TYPE is
-`prose', `prompt', or `assistant'.  Consecutive prose entries
-are merged.  Skips keywords and empty segments."
-  (let* (;; 'greater-element granularity: identifies paragraphs, special
-         ;; blocks, src blocks, example blocks - without recursing into
-         ;; their contents (we extract raw text anyway).
-         (tree (org-element-parse-buffer 'greater-element))
-         ;; Walk tree in document order, collecting context elements.
-         ;; org-element-map finds these at any depth (under headlines).
-         ;; nil returns are filtered automatically.
-         (raw (org-element-map tree '(paragraph special-block
-                                      src-block example-block)
-                (lambda (el)
-                  (when (<= (org-element-property :end el) pos)
-                    (pcase (org-element-type el)
-                      ;; Prose paragraph -> user context
-                      ('paragraph
-                       (let ((text (string-trim
-                                    (buffer-substring-no-properties
-                                     (org-element-property :begin el)
-                                     (org-element-property :end el)))))
-                         (when (> (length text) 0)
-                           (cons 'prose text))))
-                      ;; Source block -> user context, wrapped in markdown fence
-                      ('src-block
-                       (let ((lang (or (org-element-property :language el) ""))
-                             (value (org-element-property :value el)))
-                         (when (and value (> (length (string-trim value)) 0))
-                           (cons 'prose
-                                 (concat "```" lang "\n"
-                                         (string-trim value)
-                                         "\n```")))))
-                      ;; Example block -> user context, wrapped in fence
-                      ('example-block
-                       (let ((value (org-element-property :value el)))
-                         (when (and value (> (length (string-trim value)) 0))
-                           (cons 'prose
-                                 (concat "```\n"
-                                         (string-trim value)
-                                         "\n```")))))
-                      ;; PROMPT or ASSISTANT special block
-                      ('special-block
-                       (let ((type-str (org-element-property :type el))
-                             (cb (org-element-property :contents-begin el))
-                             (ce (org-element-property :contents-end el)))
-                         (when (member (upcase type-str) '("PROMPT" "ASSISTANT"))
-                           (let ((content (and cb ce
-                                              (string-trim
-                                               (buffer-substring-no-properties cb ce)))))
-                             (when (and content (> (length content) 0))
-                               (cons (if (string-equal-ignore-case type-str "PROMPT")
-                                         'prompt 'assistant)
-                                     content))))))))))))
-    ;; Merge consecutive prose entries so multiple paragraphs and code
-    ;; blocks between prompts become one user context message.
-    (let ((merged nil))
-      (dolist (entry raw)
-        (if (and (eq (car entry) 'prose)
-                 merged
-                 (eq (car (car merged)) 'prose))
-            ;; Previous entry was also prose - append with blank line
-            (setcar merged (cons 'prose
-                                 (concat (cdar merged) "\n\n" (cdr entry))))
-          (push entry merged)))
-      (nreverse merged))))
+`prose', `prompt', or `assistant'."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((result nil)
+          (prose-start (point-min))
+          (case-fold-search t))
+      (while (and ( <= (point) pos)
+		(re-search-forward
+              "^[ \t]*#\\+begin_\\(prompt\\|assistant\\)" pos t))
+        (let* ((block-type (downcase (match-string 1)))
+               (begin-line-start (line-beginning-position)))
+          ;; Prose before this block
+          (when (< prose-start begin-line-start)
+            (let ((prose (string-trim
+                          (buffer-substring-no-properties
+                           prose-start begin-line-start))))
+              (when (> (length prose) 0)
+                (push (cons 'prose prose) result))))
+          ;; Content starts on the next line
+          (forward-line 1)
+          (let ((content-start (point)))
+            (if (re-search-forward
+                 (format "^[ \t]*#\\+end_%s" block-type) pos t)
+                (let ((content-end (line-beginning-position)))
+                  (let ((content (string-trim
+                                  (buffer-substring-no-properties
+                                   content-start content-end))))
+                    (when (> (length content) 0)
+                      (push (cons (intern block-type) content) result)))
+                  ;; Next prose starts after end line
+                  (forward-line 1)
+                  (setq prose-start (point)))
+              ;; No matching end found, skip
+              (setq prose-start content-start)))))
+      (nreverse result))))
 
 (defun org-dialog--blocks-to-messages (blocks config)
   "Converts BLOCKS to OpenAI messages array.
@@ -91,6 +62,39 @@ CONFIG is a plist with :system."
 		(content . ,content))
 	      messages)))
     (nreverse messages)))
+
+(defun org-dialog--write-assistant-block (content)
+  "Write some content inside an ASSISTANT block, right after a PROMPT block.
+If an ASSISTANT block already exists it is replaced."
+  (let ((bounds (org-dialog--in-prompt-p)))
+    (unless bounds
+      (user-error "Not inside a #+BEGIN_PROMPT block"))
+    (save-excursion
+      (goto-char (cdr bounds))
+      (let ((case-fold-search t)
+	    (insert-at nil))
+	;; Check for existing assistant block immediately after.
+	(save-excursion
+	  (forward-line 1)
+	  (skip-chars-forward " \t\n")
+	  (when (looking-at "^[\t]*#\\+begin_assistant")
+	    (setq insert-at (point))))
+	(if insert-at
+	    ;; replace content of existing assistant block
+	    (progn
+	      (goto-char insert-at)
+	      (forward-line 1)
+	      (let ((content-start (point)))
+		(re-search-forward "^[\t]*#\\+end_assistant")
+		(delete-region content-start (line-beginning-position))
+		(goto-char content-start)
+		(insert (org-dialog--escape-org content) "\n")))
+	  (goto-char (cdr bounds))
+	  (end-of-line)
+	  (insert "\n\n#+begin_assistant\n"
+		  (org-dialog--escape-org content)
+		  "\n#+end_assistant"))))
+    (org-dialog--apply-overlays)))
 
 (defun org-dialog--infer (messages config callback error-callback)
   "Send MESSAGES to a Chat Completions endpoint.
@@ -129,7 +133,7 @@ ERROR-CALLBACK receives an error string."
                                           (alist-get 'message
                                                      (aref choices 0))))))
                (if text
-                   (funcall cb text)
+                   (funcall cb text resp)
                  (funcall err-cb
                           (format "No content in response: %s"
                                   (buffer-substring (point) (point-max))))))
@@ -144,6 +148,11 @@ Escapes lines starting with `*' (headings) or `#+' (keywords/blocks)."
   (replace-regexp-in-string
    "^\\(\\*\\|#\\+\\)" ",\\1" text))
 
+(defun org-dialog--pp-json (obj)
+  "Return OBJ as a pretty-printed JSON string."
+  (let ((json-encoding-pretty-print t))
+    (json-encode obj)))
+
 (defun org-dialog-execute ()
   "Send the current prompt block to inference endpoint and insert the response."
   (interactive)
@@ -151,8 +160,10 @@ Escapes lines starting with `*' (headings) or `#+' (keywords/blocks)."
     (unless bounds
       (user-error "Not inside a #+BEGIN_PROMPT block"))
     (let* ((prompt-end (cdr bounds))
+	   (params (org-dialog--prompt-params))
+	   (debug-p (and params (string-match-p ":debug" params)))
 	   (config (org-dialog--config))
-	   (blocks (org-dialog--parse-blocks prompt-end))
+	   (blocks (org-dialog--parse-chunks prompt-end))
 	   (messages (org-dialog--blocks-to-messages blocks config))
 	   (buf (current-buffer))
 	   (inhibit-read-only t))
@@ -161,45 +172,27 @@ Escapes lines starting with `*' (headings) or `#+' (keywords/blocks)."
       (message "org-dialog: inferring...")
       (funcall #'org-dialog--infer
 	       messages config
-	       (lambda (text)
+	       (lambda (text resp)
 		 (with-current-buffer buf
-		   (let ((inhibit-read-only t))
-		     (save-excursion
-		       (goto-char prompt-end)
-		       (let ((case-fold-search t)
-			     (insert-at nil))
-			 ;; Check for existing assistant block immediately after
-			 (save-excursion
-			   (forward-line 1)
-			   (skip-chars-forward " \t\n")
-			   (when (looking-at "^[\t]*#\\+begin_assistant")
-			     (setq insert-at (point))))
-			 (if insert-at
-			     ;; replace content of existing assistant block
-			     (progn
-			       (goto-char insert-at)
-			       (forward-line 1)
-			       (let ((content-start (point)))
-				 (re-search-forward "^[ \t]*#\\+end_assistant")
-				 (delete-region content-start (line-beginning-position))
-				 (goto-char content-start)
-				 (insert (org-dialog--escape-org text) "\n")))
-			   ;; Insert new assistant block
-			   (goto-char prompt-end)
-			   (end-of-line)
-			   (insert "\n\n#+begin_assistant\n"
-				   (org-dialog--escape-org text)
-				   "\n#+end_assistant"))))
-		     ; (org-dialog--apply-overlays)
-		     (org-dialog--apply-overlays)
-		     (setq buffer-read-only nil)
-		     (message "org-dialog: done."))))
+		   (let* ((inhibit-read-only t)
+			  (output
+			   (if debug-p
+			       (concat text
+				       "\n\n--- Request ---\n"
+				       (org-dialog--pp-json
+					`((model . ,(plist-get config :model))
+					  (messages . ,(vconcat messages))))
+				       "\n\n--- Response ---\n"
+				       (org-dialog--pp-json resp))
+			     text)))
+		     (org-dialog--write-assistant-block output)
+		     (setq buffer-read-only nil))))
 	       ;; Error callback
 	       (lambda (err)
 		 (with-current-buffer buf
 		   (let ((inhibit-read-only t))
 		     (setq buffer-read-only nil))
-		   (message "org-dialog error: %s" err)))))))
+		   (org-dialog--write-assistant-block err)))))))
 
 ;;; Config
 (defun org-dialog--keyword (key)
@@ -233,6 +226,16 @@ BEG is the start of #+begin_prompt line, END is the end of #+end_prompt line."
 	    (let ((end (line-end-position)))
 	      (when ( <= pos end)
 		(cons beg end)))))))))
+
+(defun org-dialog--prompt-params ()
+  "Parse parameter string from the #+begin_prompt line containing point.
+Returns the trimmed parameter string, or nil if none."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_prompt\\(.*\\)" nil t)
+        (let ((params (string-trim (match-string 1))))
+          (when (> (length params) 0)
+            params))))))
 
 (defface org-dialog-assistant
   '((((background dark))

@@ -27,11 +27,11 @@ interaction with LLMs while editing org files. Inspired by SolveIt
    M-x org-dialog-mode
    #+end_example
 5. Insert a prompt block:
-   #+begin_example
-   #+begin_prompt
-   Your question here
-   #+end_prompt
-   #+end_example
+   #+begin_src org
+     ,#+begin_prompt
+     Your question here
+     ,#+end_prompt
+   #+end_src
 6. Place point inside the block and press C-c C-c.
 7. An ASSISTANT block is inserted or updated below.
 

@@ -9,284 +9,154 @@
 (require 'json)
 (require 'url)
 
-(defun org-dialog--parse-chunks (pos)
-  "Parse dialogue blocks from buffer start to POS.
-Returns ordered list of (TYPE . CONTENT) where TYPE is
-`prose', `prompt', or `assistant'."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((result nil)
-          (prose-start (point-min))
-          (case-fold-search t))
-      (while (and ( <= (point) pos)
-		(re-search-forward
-              "^[ \t]*#\\+begin_\\(prompt\\|assistant\\)" pos t))
-        (let* ((block-type (downcase (match-string 1)))
-               (begin-line-start (line-beginning-position)))
-          ;; Prose before this block
-          (when (< prose-start begin-line-start)
-            (let ((prose (string-trim
-                          (buffer-substring-no-properties
-                           prose-start begin-line-start))))
-              (when (> (length prose) 0)
-                (push (cons 'prose prose) result))))
-          ;; Content starts on the next line
-          (forward-line 1)
-          (let ((content-start (point)))
-            (if (re-search-forward
-                 (format "^[ \t]*#\\+end_%s" block-type) pos t)
-                (let ((content-end (line-beginning-position)))
-                  (let ((content (string-trim
-                                  (buffer-substring-no-properties
-                                   content-start content-end))))
-                    (when (> (length content) 0)
-                      (push (cons (intern block-type) content) result)))
-                  ;; Next prose starts after end line
-                  (forward-line 1)
-                  (setq prose-start (point)))
-              ;; No matching end found, skip
-              (setq prose-start content-start)))))
-      (nreverse result))))
+(defun org-dialog--pointer-at-prompt-p ()
+  "Return non-nil if point is anywhere inside a PROMPT block."
+  (let ((el (org-element-context)))
+    (while (and el (not (eq (org-element-type el) 'special-block)))
+      (setq el (org-element-property :parent el)))
+    (and el
+         (string-equal
+          (upcase (org-element-property :type el))
+          "PROMPT"))))
 
-(defun org-dialog--blocks-to-messages (blocks config)
-  "Converts BLOCKS to OpenAI messages array.
-CONFIG is a plist with :system."
-  (let ((messages nil)
-	(system (plist-get config :system)))
-    (when system
-      (push `((role . "system") (content . ,system)) messages))
-    (dolist (block blocks)
-      (let ((type (car block))
-	    (content (cdr block)))
-	(push `((role . ,(if (eq type 'assistant) "assistant" "user"))
-		(content . ,content))
-	      messages)))
+(defun org-dialog--collect-messages ()
+  "Return ordered list of (role . content) from current buffer.
+Everything up to and including each PROMPT block is a single user message.
+ASSISTANT blocks become assistant messages."
+  (let ((elements (org-element-parse-buffer))
+	(messages '())
+	(pos (point-min)))
+    (org-element-map elements 'special-block
+      (lambda (el)
+	(let* ((type (upcase (org-element-property :type el)))
+	       (begin (org-element-property :begin el))
+	       (end (org-element-property :end el))
+	       (contents-begin (org-element-property :contents-begin el))
+	       (contents-end (org-element-property :contents-end el))
+	       (content-up-to-el (buffer-substring-no-properties
+				  pos begin))
+	       (content (buffer-substring-no-properties contents-begin contents-end)))
+	  (cond
+	   ((string= type "PROMPT")
+	    (push (cons "user"
+			(format "<doc>%s</doc><task>%s</task>"
+				content-up-to-el content))
+		  messages)
+	    (setq pos end))
+	   ((string= type "ASSISTANT")
+	    (push (cons "assistant" content) messages)
+	    (setq pos end))))))
+    (when (< pos (point-max))
+      (push (cons "user"
+		  (buffer-substring-no-properties pos (point-max)))
+	    messages))
     (nreverse messages)))
 
-(defun org-dialog--write-assistant-block (content)
-  "Write some content inside an ASSISTANT block, right after a PROMPT block.
-If an ASSISTANT block already exists it is replaced."
-  (let ((bounds (org-dialog--in-prompt-p)))
-    (unless bounds
-      (user-error "Not inside a #+BEGIN_PROMPT block"))
-    (save-excursion
-      (goto-char (cdr bounds))
-      (let ((case-fold-search t)
-	    (insert-at nil))
-	;; Check for existing assistant block immediately after.
-	(save-excursion
-	  (forward-line 1)
-	  (skip-chars-forward " \t\n")
-	  (when (looking-at "^[\t]*#\\+begin_assistant")
-	    (setq insert-at (point))))
-	(if insert-at
-	    ;; replace content of existing assistant block
-	    (progn
-	      (goto-char insert-at)
-	      (forward-line 1)
-	      (let ((content-start (point)))
-		(re-search-forward "^[\t]*#\\+end_assistant")
-		(delete-region content-start (line-beginning-position))
-		(goto-char content-start)
-		(insert (org-dialog--escape-org content) "\n")))
-	  (goto-char (cdr bounds))
-	  (end-of-line)
-	  (insert "\n\n#+begin_assistant\n"
-		  (org-dialog--escape-org content)
-		  "\n#+end_assistant"))))
-    (org-dialog--apply-overlays)))
+(defun org-dialog--collect-keywords ()
+  (let ((kws (org-collect-keywords
+	      '("DIALOG_MODEL" "DIALOG_ENDPOINT" "DIALOG_API_KEY" "DIALOG_SYSTEM"))))
+    (list :model (cadr (assoc "DIALOG_MODEL" kws))
+	  :endpoint (cadr (assoc "DIALOG_ENDPOINT" kws))
+	  :api-key (and (cadr (assoc "DIALOG_API_KEY" kws))
+			(getenv (cadr (assoc "DIALOG_API_KEY" kws))))
+	  :system (cadr (assoc "DIALOG_SYSTEM" kws)))))
 
-(defun org-dialog--infer (messages config callback error-callback)
-  "Send MESSAGES to a Chat Completions endpoint.
-CONFIG is a plist with :endpoint :api-key :model.
-CALLBACK receives the response text.
-ERROR-CALLBACK receives an error string."
-  (let* ((endpoint (plist-get config :endpoint))
-         (api-key  (plist-get config :api-key))
-         (model    (plist-get config :model))
-         (url-request-method "POST")
-         (url-request-extra-headers
-          `(("Content-Type"  . "application/json")
-            ("Authorization" . ,(concat "Bearer " api-key))))
-         (url-request-data
-          (encode-coding-string
-           (json-serialize `((model . ,model)
-                             (messages . ,(vconcat messages))))
-           'utf-8)))
-    (url-retrieve
-     endpoint
-     (lambda (status cb err-cb)
-       (if (or (plist-get status :error)
-               (null url-http-end-of-headers))
-           (funcall err-cb
-                    (format "HTTP error: %s"
-                            (or (plist-get status :error) "no response headers")))
-         (goto-char url-http-end-of-headers)
-         (condition-case e
-             (let* ((json-object-type 'alist)
-                    (json-array-type  'vector)
-                    (resp (json-read))
-                    (choices (alist-get 'choices resp))
-                    (text (and choices
-                               (> (length choices) 0)
-                               (alist-get 'content
-                                          (alist-get 'message
-                                                     (aref choices 0))))))
-               (if text
-                   (funcall cb text resp)
-                 (funcall err-cb
-                          (format "No content in response: %s"
-                                  (buffer-substring (point) (point-max))))))
-           (error
-            (funcall err-cb
-                     (format "JSON parse error: %s" e))))))
-     (list callback error-callback) t)))
+(defun org-dialog--prepare-request (messages config)
+  "Build a complete LLM request from MESSAGES and CONFIG.
+MESSAGES is the output of `org-dialog--collect-messages'.
+CONFIG is the output of `org-dialog--config'.
+Returns plist (:endpoint :headers :payload)."
+  (let* ((system (plist-get config :system))
+	 (api-messages
+	  (vconcat
+	   (when system
+	     (vector `((role . "developer") (content . ,system))))
+	   (mapcar (lambda (m)
+		     `((role . ,(car m)) (content . ,(cdr m))))
+		   messages))))
+    (list
+     :endpoint (plist-get config :endpoint)
+     :headers `(("Content-Type" . "application/json")
+		("Authorization" . ,(concat "Bearer " (plist-get config :api-key))))
+     :payload (encode-coding-string
+	       (json-serialize
+		`((model . ,(plist-get config :model))
+		  (messages . ,api-messages)))
+	       'utf-8))))
 
-(defun org-dialog--escape-org (text)
-  "Comma-escape lines in TEXT that org would interpret as structure.
-Escapes lines starting with `*' (headings) or `#+' (keywords/blocks)."
-  (replace-regexp-in-string
-   "^\\(\\*\\|#\\+\\)" ",\\1" text))
+(defun org-dialog--execute-request (request callback)
+  "Execute LLM REQUEST and call CALLBACK with response string."
+  (require 'plz)
+  (plz 'post
+    (plist-get request :endpoint)
+    :headers (plist-get request :headers)
+    :body (plist-get request :payload)
+    :as 'string
+    :then (lambda (resp)
+            (funcall callback resp))
+    :else (lambda (err)
+            (message "org-dialog request failed: %s" err))))
 
-(defun org-dialog--pp-json (obj)
-  "Return OBJ as a pretty-printed JSON string."
-  (let ((json-encoding-pretty-print t))
-    (json-encode obj)))
+(defun org-dialog--insert-assistant-after-prompt (buffer prompt-end content)
+  "Insert or replace ASSISTANT block after PROMPT in BUFFER."
+  (with-current-buffer buffer
+    (let ((end (copy-marker prompt-end)))
+      (save-excursion
+	(goto-char end)
+	(skip-chars-forward " \t\r\n")
+	(let ((next (org-element-at-point)))
+	  (when (and (eq (org-element-type next) 'special-block)
+		     (string= (upcase (org-element-property :type next)) "ASSISTANT"))
+	    (delete-region (org-element-property :begin next)
+			   (org-element-property :end next))
+	    (delete-region end (progn (goto-char end)
+				      (skip-chars-forward " \t\r\n")
+				      (point)))))
+	(goto-char end)
+	(insert "\n\n#+begin_assistant\n"
+		content
+		(unless (string-suffix-p "\n" content) "\n")
+		"#+end_assistant")))))
 
-(defun org-dialog-execute ()
-  "Send the current prompt block to inference endpoint and insert the response."
+(defun org-dialog-execute-prompt ()
+  "Execute PROMPT block at point and insert ASSISTANT response."
   (interactive)
-  (let ((bounds (org-dialog--in-prompt-p)))
-    (unless bounds
-      (user-error "Not inside a #+BEGIN_PROMPT block"))
-    (let* ((prompt-end (cdr bounds))
-	   (params (org-dialog--prompt-params))
-	   (debug-p (and params (string-match-p ":debug" params)))
-	   (config (org-dialog--config))
-	   (blocks (org-dialog--parse-chunks prompt-end))
-	   (messages (org-dialog--blocks-to-messages blocks config))
-	   (buf (current-buffer))
-	   (inhibit-read-only t))
-      ;; Set read-only
-      (setq buffer-read-only t)
-      (message "org-dialog: inferring...")
-      (funcall #'org-dialog--infer
-	       messages config
-	       (lambda (text resp)
-		 (with-current-buffer buf
-		   (let* ((inhibit-read-only t)
-			  (output
-			   (if debug-p
-			       (concat text
-				       "\n\n--- Request ---\n"
-				       (org-dialog--pp-json
-					`((model . ,(plist-get config :model))
-					  (messages . ,(vconcat messages))))
-				       "\n\n--- Response ---\n"
-				       (org-dialog--pp-json resp))
-			     text)))
-		     (org-dialog--write-assistant-block output)
-		     (setq buffer-read-only nil))))
-	       ;; Error callback
-	       (lambda (err)
-		 (with-current-buffer buf
-		   (let ((inhibit-read-only t))
-		     (setq buffer-read-only nil))
-		   (org-dialog--write-assistant-block err)))))))
+  (unless (org-dialog--pointer-at-prompt-p)
+    (user-error "Not on a PROMPT block"))
+  (let* ((el (org-element-at-point))
+         (prompt-end
+          (save-excursion
+            (goto-char (org-element-property :end el))
+            (forward-line 1)
+            (point)))
+         (buffer (current-buffer))
+         (messages (org-dialog--collect-messages))
+         (config (org-dialog--collect-keywords))
+         (request (org-dialog--prepare-request messages config)))
+    (org-dialog--execute-request
+     request
+     (lambda (resp)
+       (let* ((json (json-parse-string resp :object-type 'alist))
+              (choices (alist-get 'choices json))
+              (msg (alist-get 'message (aref choices 0)))
+              (content (alist-get 'content msg)))
+         (org-dialog--insert-assistant-after-prompt
+          buffer prompt-end content))))))
 
-;;; Config
-(defun org-dialog--keyword (key)
-  "Read a #+KEY: value from the current org buffer."
-  (cadr (assoc key (org-collect-keywords (list key)))))
+(defvar org-dialog-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'org-dialog--maybe-execute)
+    map))
 
-(defun org-dialog--config ()
-  "Compose dialog config from buffer keywords.
-Returns plist (:model :endpoint :api-key :system)."
-  (let* ((model (org-dialog--keyword "DIALOG_MODEL"))
-	 (endpoint (org-dialog--keyword "DIALOG_ENDPOINT"))
-	 (api-key-env (org-dialog--keyword "DIALOG_API_KEY"))
-	 (api-key (getenv api-key-env))
-	 (system (org-dialog--keyword "DIALOG_SYSTEM")))
-    (unless model (user-error "No #+DIALOG_MODEL: set"))
-    (unless endpoint (user-error "No #+DIALOG_ENDPOINT: set"))
-    (unless api-key (user-error "No #+DIALOG_API_KEY: set"))
+(defun org-dialog--maybe-execute ()
+  (interactive)
+  (if (org-dialog--pointer-at-prompt-p)
+      (org-dialog-execute-prompt)
+    (org-ctrl-c-ctrl-c)))
 
-    (list :model model :endpoint endpoint :api-key api-key :system system)))
-
-;;; Block detection
-(defun org-dialog--in-prompt-p ()
-    "Return (BEG . END) if point is inside a #+begin_prompt block, nil otherwise.
-BEG is the start of #+begin_prompt line, END is the end of #+end_prompt line."
-  (save-excursion
-    (let ((pos (point))
-	  (case-fold-search t))
-      (when (re-search-backward "^[ \t]*#\\+begin_prompt" nil t)
-	(let ((beg (line-beginning-position)))
-	  (when (re-search-forward "^[ \t]*#\\+end_prompt" nil t)
-	    (let ((end (line-end-position)))
-	      (when ( <= pos end)
-		(cons beg end)))))))))
-
-(defun org-dialog--prompt-params ()
-  "Parse parameter string from the #+begin_prompt line containing point.
-Returns the trimmed parameter string, or nil if none."
-  (save-excursion
-    (let ((case-fold-search t))
-      (when (re-search-backward "^[ \t]*#\\+begin_prompt\\(.*\\)" nil t)
-        (let ((params (string-trim (match-string 1))))
-          (when (> (length params) 0)
-            params))))))
-
-(defface org-dialog-assistant
-  '((((background dark))
-     :foreground "#88c0d0" :slant italic :extend t)
-    (((background light))
-     :foreground "#3465a4" :slant italic :extend t))
-  "Face for assistant block content."
-  :group 'org-dialog)
-
-(defun org-dialog--apply-overlays ()
-  "Apply face overlays to all assistant block contents in the buffer."
-  (remove-overlays (point-min) (point-max) 'org-dialog-assistant t)
-  (save-excursion
-    (goto-char (point-min))
-    (let ((case-fold-search t))
-      (while (re-search-forward "^[ \t]*#\\+BEGIN_ASSISTANT" nil t)
-        (let ((content-start (progn (forward-line 1) (point))))
-          (when (re-search-forward "^[ \t]*#\\+END_ASSISTANT" nil t)
-            (let* ((content-end (line-beginning-position))
-                   (ov (make-overlay content-start content-end nil t nil)))
-              (overlay-put ov 'org-dialog-assistant t)
-              (overlay-put ov 'face 'org-dialog-assistant)
-              (overlay-put ov 'line-prefix "  ")
-              (overlay-put ov 'wrap-prefix "  "))))))))
-
-;;; C-c C-c hook
-
-(defun org-dialog--ctrl-c-ctrl-c ()
-  "Hook for `org-ctrl-c-ctrl-c-hook'.
-If point is inside a prompt block, execute it and return t."
-  (when (org-dialog--in-prompt-p)
-    (org-dialog-execute)
-    t))
-
-;;; Minor mode
-
-;;;###autoload
 (define-minor-mode org-dialog-mode
-  "Minor mode for LLM dialog notebooks in org-mode.
-Intercepts C-c C-c inside #+BEGIN_PROMPT blocks to send
-conversation history to an LLM and insert the response."
-  :lighter " Dia"
-  :group 'org-dialog
-  (if org-dialog-mode
-      (progn
-        (add-hook 'org-ctrl-c-ctrl-c-hook
-                  #'org-dialog--ctrl-c-ctrl-c nil t)
-        (org-dialog--apply-overlays))
-    (remove-hook 'org-ctrl-c-ctrl-c-hook
-                 #'org-dialog--ctrl-c-ctrl-c t)
-    (remove-overlays (point-min) (point-max) 'org-dialog-assistant t)))
+  "Execute PROMPT blocks with C-c C-c."
+  :lighter " Dialog"
+  :keymap org-dialog-mode-map)
 
-  (provide 'org-dialog)
-  ;;; org-dialog.el ends here
+(provide 'org-dialog)

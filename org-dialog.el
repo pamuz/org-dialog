@@ -9,47 +9,49 @@
 (require 'json)
 (require 'url)
 
-(defun org-dialog--pointer-at-prompt-p ()
-  "Return non-nil if point is anywhere inside a PROMPT block."
+(defun org-dialog--prompt-block-at-point ()
+  "Return the PROMPT special-block element at point, or nil."
   (let ((el (org-element-context)))
     (while (and el (not (eq (org-element-type el) 'special-block)))
       (setq el (org-element-property :parent el)))
     (and el
-         (string-equal
-          (upcase (org-element-property :type el))
-          "PROMPT"))))
+         (string-equal (upcase (org-element-property :type el)) "PROMPT")
+         el)))
 
-(defun org-dialog--collect-messages ()
+(defun org-dialog--pointer-at-prompt-p ()
+  "Return non-nil if point is anywhere inside a PROMPT block."
+  (not (null (org-dialog--prompt-block-at-point))))
+
+(defun org-dialog--collect-messages (&optional limit)
   "Return ordered list of (role . content) from current buffer.
 Everything up to and including each PROMPT block is a single user message.
-ASSISTANT blocks become assistant messages."
+ASSISTANT blocks become assistant messages.
+When LIMIT is non-nil, only consider buffer content up to that position."
   (let ((elements (org-element-parse-buffer))
 	(messages '())
-	(pos (point-min)))
+	(pos (point-min))
+	(bound (or limit (point-max))))
     (org-element-map elements 'special-block
       (lambda (el)
 	(let* ((type (upcase (org-element-property :type el)))
 	       (begin (org-element-property :begin el))
 	       (end (org-element-property :end el))
 	       (contents-begin (org-element-property :contents-begin el))
-	       (contents-end (org-element-property :contents-end el))
-	       (content-up-to-el (buffer-substring-no-properties
-				  pos begin))
-	       (content (buffer-substring-no-properties contents-begin contents-end)))
-	  (cond
-	   ((string= type "PROMPT")
-	    (push (cons "user"
-			(format "<doc>%s</doc><task>%s</task>"
-				content-up-to-el content))
-		  messages)
-	    (setq pos end))
-	   ((string= type "ASSISTANT")
-	    (push (cons "assistant" content) messages)
-	    (setq pos end))))))
-    (when (< pos (point-max))
-      (push (cons "user"
-		  (buffer-substring-no-properties pos (point-max)))
-	    messages))
+	       (contents-end (org-element-property :contents-end el)))
+	  (when (<= contents-end bound)
+	    (let ((content-up-to-el (buffer-substring-no-properties
+				     pos begin))
+		  (content (buffer-substring-no-properties contents-begin contents-end)))
+	      (cond
+	       ((string= type "PROMPT")
+		(push (cons "user"
+			    (format "<doc>%s</doc><task>%s</task>"
+				    content-up-to-el content))
+		      messages)
+		(setq pos end))
+	       ((string= type "ASSISTANT")
+		(push (cons "assistant" content) messages)
+		(setq pos end))))))))
     (nreverse messages)))
 
 (defun org-dialog--collect-keywords ()
@@ -108,40 +110,50 @@ Returns plist (:endpoint :headers :payload)."
 	  (when (and (eq (org-element-type next) 'special-block)
 		     (string= (upcase (org-element-property :type next)) "ASSISTANT"))
 	    (delete-region (org-element-property :begin next)
-			   (org-element-property :end next))
-	    (delete-region end (progn (goto-char end)
-				      (skip-chars-forward " \t\r\n")
-				      (point)))))
+			   (org-element-property :end next))))
+	(delete-region end (progn (goto-char end)
+				  (skip-chars-forward " \t\r\n")
+				  (point)))
 	(goto-char end)
-	(insert "\n\n#+begin_assistant\n"
+	(insert "\n#+begin_assistant\n"
 		content
 		(unless (string-suffix-p "\n" content) "\n")
-		"#+end_assistant")))))
+		"#+end_assistant\n")))))
 
 (defun org-dialog-execute-prompt ()
   "Execute PROMPT block at point and insert ASSISTANT response."
   (interactive)
-  (unless (org-dialog--pointer-at-prompt-p)
-    (user-error "Not on a PROMPT block"))
-  (let* ((el (org-element-at-point))
-         (prompt-end
-          (save-excursion
-            (goto-char (org-element-property :end el))
-            (forward-line 1)
-            (point)))
-         (buffer (current-buffer))
-         (messages (org-dialog--collect-messages))
-         (config (org-dialog--collect-keywords))
-         (request (org-dialog--prepare-request messages config)))
-    (org-dialog--execute-request
-     request
-     (lambda (resp)
-       (let* ((json (json-parse-string resp :object-type 'alist))
-              (choices (alist-get 'choices json))
-              (msg (alist-get 'message (aref choices 0)))
-              (content (alist-get 'content msg)))
-         (org-dialog--insert-assistant-after-prompt
-          buffer prompt-end content))))))
+  (let ((block (org-dialog--prompt-block-at-point)))
+    (unless block
+      (user-error "Not on a PROMPT block"))
+    (let* ((debug (org-dialog--prompt-debug-p block))
+	   (prompt-end
+	    (save-excursion
+	      (goto-char (org-element-property :contents-end block))
+	      (forward-line 1)
+	      (point)))
+	   (buffer (current-buffer))
+	   (messages (org-dialog--collect-messages prompt-end))
+	   (config (org-dialog--collect-keywords))
+	   (request (org-dialog--prepare-request messages config)))
+      (org-dialog--execute-request
+       request
+       (lambda (resp)
+	 (let* ((json (json-parse-string resp :object-type 'alist))
+		(choices (alist-get 'choices json))
+		(msg (alist-get 'message (aref choices 0)))
+		(content (alist-get 'content msg))
+		(final
+		 (if debug
+		     (format "Response:\n%s\n\nRequest:\n%s"
+			     resp (plist-get request :payload))
+		   content)))
+	   (org-dialog--insert-assistant-after-prompt
+	    buffer prompt-end final)))))))
+
+(defun org-dialog--prompt-debug-p (block)
+  (let ((params (org-element-property :parameters block)))
+    (and params (string-match-p ":debug\\s-+yes" params))))
 
 (defvar org-dialog-mode-map
   (let ((map (make-sparse-keymap)))

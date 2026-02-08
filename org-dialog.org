@@ -1,5 +1,6 @@
 # -*- eval: (org-dialog-mode 1); -*-
 #+TITLE: org-dialog
+#+TODO: TODO IN-PROGRESS WAITING | DONE CANCELLED
 #+PROPERTY: header-args :tangle org-dialog.el :padline yes
 
 #+DIALOG_MODEL: gpt-5.2-chat
@@ -77,15 +78,18 @@ of it into the text.
 * Key functionality
 ** Detect if pointer is at a PROMPT block
 #+begin_src emacs-lisp
-(defun org-dialog--pointer-at-prompt-p ()
-  "Return non-nil if point is anywhere inside a PROMPT block."
+(defun org-dialog--prompt-block-at-point ()
+  "Return the PROMPT special-block element at point, or nil."
   (let ((el (org-element-context)))
     (while (and el (not (eq (org-element-type el) 'special-block)))
       (setq el (org-element-property :parent el)))
     (and el
-         (string-equal
-          (upcase (org-element-property :type el))
-          "PROMPT"))))
+         (string-equal (upcase (org-element-property :type el)) "PROMPT")
+         el)))
+
+(defun org-dialog--pointer-at-prompt-p ()
+  "Return non-nil if point is anywhere inside a PROMPT block."
+  (not (null (org-dialog--prompt-block-at-point))))
 #+end_src
 
 #+begin_src emacs-lisp :tangle no :results output
@@ -123,37 +127,36 @@ replied that way, allowing deliberate steering of tone and style.
 
 ** Collecting message contents
 #+begin_src emacs-lisp
-  (defun org-dialog--collect-messages ()
+  (defun org-dialog--collect-messages (&optional limit)
     "Return ordered list of (role . content) from current buffer.
   Everything up to and including each PROMPT block is a single user message.
-  ASSISTANT blocks become assistant messages."
+  ASSISTANT blocks become assistant messages.
+  When LIMIT is non-nil, only consider buffer content up to that position."
     (let ((elements (org-element-parse-buffer))
   	(messages '())
-  	(pos (point-min)))
+  	(pos (point-min))
+  	(bound (or limit (point-max))))
       (org-element-map elements 'special-block
         (lambda (el)
   	(let* ((type (upcase (org-element-property :type el)))
   	       (begin (org-element-property :begin el))
   	       (end (org-element-property :end el))
   	       (contents-begin (org-element-property :contents-begin el))
-  	       (contents-end (org-element-property :contents-end el))
-  	       (content-up-to-el (buffer-substring-no-properties
-  				  pos begin))
-  	       (content (buffer-substring-no-properties contents-begin contents-end)))
-  	  (cond
-  	   ((string= type "PROMPT")
-  	    (push (cons "user"
-  			(format "<doc>%s</doc><task>%s</task>"
-  				content-up-to-el content))
-  		  messages)
-  	    (setq pos end))
-  	   ((string= type "ASSISTANT")
-  	    (push (cons "assistant" content) messages)
-  	    (setq pos end))))))
-      (when (< pos (point-max))
-        (push (cons "user"
-  		  (buffer-substring-no-properties pos (point-max)))
-  	    messages))
+  	       (contents-end (org-element-property :contents-end el)))
+  	  (when (<= contents-end bound)
+  	    (let ((content-up-to-el (buffer-substring-no-properties
+  				     pos begin))
+  		  (content (buffer-substring-no-properties contents-begin contents-end)))
+  	      (cond
+  	       ((string= type "PROMPT")
+  		(push (cons "user"
+  			    (format "<doc>%s</doc><task>%s</task>"
+  				    content-up-to-el content))
+  		      messages)
+  		(setq pos end))
+  	       ((string= type "ASSISTANT")
+  		(push (cons "assistant" content) messages)
+  		(setq pos end))))))))
       (nreverse messages)))
 #+end_src
 
@@ -433,15 +436,15 @@ the actual values from my keywords since this will hit a real endpoint
   	  (when (and (eq (org-element-type next) 'special-block)
   		     (string= (upcase (org-element-property :type next)) "ASSISTANT"))
   	    (delete-region (org-element-property :begin next)
-  			   (org-element-property :end next))
-  	    (delete-region end (progn (goto-char end)
-  				      (skip-chars-forward " \t\r\n")
-  				      (point)))))
+  			   (org-element-property :end next))))
+  	(delete-region end (progn (goto-char end)
+  				  (skip-chars-forward " \t\r\n")
+  				  (point)))
   	(goto-char end)
-  	(insert "\n\n#+begin_assistant\n"
+  	(insert "\n#+begin_assistant\n"
   		content
   		(unless (string-suffix-p "\n" content) "\n")
-  		"#+end_assistant")))))
+  		"#+end_assistant\n")))))
 #+end_src
 
 #+begin_src emacs-lisp :tangle no :wrap example
@@ -456,7 +459,7 @@ the actual values from my keywords since this will hit a real endpoint
         (prompt-end (save-excursion
                       (goto-char (point-min))
                       (search-forward "#+end_prompt")
-                      (line-end-position))))
+                      (line-beginning-position 2))))
     ;; first insertion
     (org-dialog--insert-assistant-after-prompt
      buf prompt-end "First response")
@@ -518,30 +521,36 @@ After deleting any existing ASSISTANT, do:
 
 ** Executing a PROMPT block
 #+begin_src emacs-lisp
-(defun org-dialog-execute-prompt ()
-  "Execute PROMPT block at point and insert ASSISTANT response."
-  (interactive)
-  (unless (org-dialog--pointer-at-prompt-p)
-    (user-error "Not on a PROMPT block"))
-  (let* ((el (org-element-at-point))
-         (prompt-end
-          (save-excursion
-            (goto-char (org-element-property :end el))
-            (forward-line 1)
-            (point)))
-         (buffer (current-buffer))
-         (messages (org-dialog--collect-messages))
-         (config (org-dialog--collect-keywords))
-         (request (org-dialog--prepare-request messages config)))
-    (org-dialog--execute-request
-     request
-     (lambda (resp)
-       (let* ((json (json-parse-string resp :object-type 'alist))
-              (choices (alist-get 'choices json))
-              (msg (alist-get 'message (aref choices 0)))
-              (content (alist-get 'content msg)))
-         (org-dialog--insert-assistant-after-prompt
-          buffer prompt-end content))))))
+  (defun org-dialog-execute-prompt ()
+    "Execute PROMPT block at point and insert ASSISTANT response."
+    (interactive)
+    (let ((block (org-dialog--prompt-block-at-point)))
+      (unless block
+        (user-error "Not on a PROMPT block"))
+      (let* ((debug (org-dialog--prompt-debug-p block))
+  	   (prompt-end
+  	    (save-excursion
+  	      (goto-char (org-element-property :contents-end block))
+  	      (forward-line 1)
+  	      (point)))
+  	   (buffer (current-buffer))
+  	   (messages (org-dialog--collect-messages prompt-end))
+  	   (config (org-dialog--collect-keywords))
+  	   (request (org-dialog--prepare-request messages config)))
+        (org-dialog--execute-request
+         request
+         (lambda (resp)
+  	 (let* ((json (json-parse-string resp :object-type 'alist))
+  		(choices (alist-get 'choices json))
+  		(msg (alist-get 'message (aref choices 0)))
+  		(content (alist-get 'content msg))
+  		(final
+  		 (if debug
+  		     (format "Response:\n%s\n\nRequest:\n%s"
+  			     resp (plist-get request :payload))
+  		   content)))
+  	   (org-dialog--insert-assistant-after-prompt
+  	    buffer prompt-end final)))))))
 #+end_src
 
 #+begin_src emacs-lisp :tangle no :wrap example
@@ -600,6 +609,188 @@ OK
 ,#+end_assistant
 #+end_example
 
+*** Debugging and learning from internals
+If a PROMPT block is executed with the header argument =:debug yes=,
+the generated ASSISTANT block includes the full request payload and
+the full raw response. This is useful for debugging, inspecting model
+inputs and outputs, and understanding the underlying API behavior.
+
+#+begin_src emacs-lisp
+  (defun org-dialog--prompt-debug-p (block)
+    (let ((params (org-element-property :parameters block)))
+      (and params (string-match-p ":debug\\s-+yes" params))))
+#+end_src
+
+#+begin_src emacs-lisp :tangle no :wrap example
+  ;; Literate integration test for PROMPT :debug yes.
+  ;; Verifies that assistant content includes request payload and raw response.
+
+  (with-temp-buffer
+    (org-mode)
+    ;; config
+    (insert "#+DIALOG_MODEL: gpt-5.2-chat\n")
+    (insert "#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n")
+    (insert "#+DIALOG_API_KEY: INFERENCE_API_KEY\n")
+    (insert "#+DIALOG_SYSTEM: You are a dry concise test assistant.\n\n")
+
+    ;; document with debug prompt
+    (insert "* Debug Test\n")
+    (insert "#+begin_prompt :debug yes\n")
+    (insert "Reply with OK.\n")
+    (insert "#+end_prompt\n")
+
+    ;; execute
+    (goto-char (point-min))
+    (search-forward "Reply with OK")
+    (org-dialog-execute-prompt)
+
+    ;; wait for assistant
+    (while (not (save-excursion
+                  (goto-char (point-min))
+                  (search-forward "#+begin_assistant" nil t)))
+      (sleep-for 5))
+
+    ;; extract assistant contents
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward "#+begin_assistant")
+      (let ((beg (line-beginning-position 2)))
+        (search-forward "#+end_assistant")
+        (buffer-substring-no-properties beg (line-beginning-position 0)))))
+#+end_src
+
+#+begin_prompt :debug yes
+Test. Just reply with the model you are.
+#+end_prompt
+
+#+begin_assistant
+Response:
+{
+  "choices": [
+    {
+      "content_filter_results": {
+        "hate": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "protected_material_code": {
+          "filtered": false,
+          "detected": false
+        },
+        "protected_material_text": {
+          "filtered": false,
+          "detected": false
+        },
+        "self_harm": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "sexual": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "violence": {
+          "filtered": false,
+          "severity": "safe"
+        }
+      },
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "annotations": [],
+        "content": "gpt-5.2-chat",
+        "refusal": null,
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1770589158,
+  "id": "chatcmpl-D77PaRPU3ktNte8v8EOXCDXuuZ8cm",
+  "model": "gpt-5.2-chat-2025-12-11",
+  "object": "chat.completion",
+  "prompt_filter_results": [
+    {
+      "prompt_index": 0,
+      "content_filter_results": {
+        "hate": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "jailbreak": {
+          "filtered": false,
+          "detected": false
+        },
+        "self_harm": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "sexual": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "violence": {
+          "filtered": false,
+          "severity": "safe"
+        }
+      }
+    }
+  ],
+  "system_fingerprint": null,
+  "usage": {
+    "completion_tokens": 17,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 0,
+      "audio_tokens": 0,
+      "reasoning_tokens": 0,
+      "rejected_prediction_tokens": 0
+    },
+    "prompt_tokens": 5687,
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cached_tokens": 0
+    },
+    "total_tokens": 5704
+  }
+}
+
+
+Request:
+{
+  "model": "gpt-5.2-chat",
+  "messages": [
+    {
+      "role": "developer",
+      "content": "You are co-authoring an org mode file with me. Please respond only with utf8 characters. No em-dashes. No sleek arrows. You always reply in a dry concise manner. As short as possible."
+    },
+    {
+      "role": "user",
+      "content": "<doc># -*- eval: (org-dialog-mode 1); -*-\n#+TITLE: org-dialog\n#+TODO: TODO IN-PROGRESS WAITING | DONE CANCELLED\n#+PROPERTY: header-args :tangle org-dialog.el :padline yes\n\n#+DIALOG_MODEL: gpt-5.2-chat\n#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n#+DIALOG_API_KEY: INFERENCE_API_KEY\n#+DIALOG_SYSTEM: You are co-authoring an org mode file with me. Please respond only with utf8 characters. No em-dashes. No sleek arrows. You always reply in a dry concise manner. As short as possible.\n\n* Scaffolding\n#+begin_src emacs-lisp\n  ;;; org-dialog.el --- Introduces executable PROMPT org blocks in org-mode -*- lexical-binding: t; -*-\n  ;; Author: Pablo\n  ;; Version: 0.1.0\n  ;; Package-Requires: ((emacs \"27.1\") (org \"9.0\"))\n\n  ;;; Code:\n  (require 'org)\n  (require 'org-element)\n  (require 'json)\n  (require 'url)\n#+end_src\n\n\n* Introduction\nGoal extend Emacs OrgMode with a new kind of block: PROMPT.\n\nAs the user is authoring an org text, they can put down a prompt block\n\n#+begin_src org :tangle no\n  ,#+TITLE: LLMs as co-author of literate programming documents\n\n  Large language models make natural co-authors for literate\n  programming, where explanation and code are interwoven into a single\n  readable narrative. Literate programming demands not just correct code\n  but clear reasoning - a task that plays to an LLM's strengths. By\n  partnering with a human author, an LLM can draft prose, suggest code,\n  and help maintain a coherent narrative, making it easier to produce\n  documents that read as well as they run.\n\n  ,#+begin_prompt\n  What should be the TOC for this document?\n  ,#+end_prompt\n#+end_src\n\nA prompt block is executed by placing point anywhere inside it and\npressing =C-c C-c=. The system takes the org buffer up to the end of\nthat PROMPT block, converts it into an LLM request, sends it, and\nreceives a response. The response is then inserted into an ASSISTANT\nblock immediately after the PROMPT block. The user can continue\nediting the document using the response, or directly incorporate parts\nof it into the text.\n\n#+begin_src org :tangle no\n  ,#+TITLE: LLMs as co-author of literate programming documents\n\n  Large language models make natural co-authors for literate\n  programming, where explanation and code are interwoven into a single\n  readable narrative.\n\n  ,#+begin_prompt\n  What should be the TOC for this document?\n  ,#+end_prompt\n\n  ,#+begin_assistant\n  * Introduction\n  * What is Literate Programming\n  * Why LLMs are Good Co-authors\n  * Workflow and Tooling\n  * Examples\n  * Limitations and Caveats\n  * Conclusion\n  ,#+end_assistant\n#+end_src\n\n\n* Key functionality\n** Detect if pointer is at a PROMPT block\n#+begin_src emacs-lisp\n(defun org-dialog--prompt-block-at-point ()\n  \"Return the PROMPT special-block element at point, or nil.\"\n  (let ((el (org-element-context)))\n    (while (and el (not (eq (org-element-type el) 'special-block)))\n      (setq el (org-element-property :parent el)))\n    (and el\n         (string-equal (upcase (org-element-property :type el)) \"PROMPT\")\n         el)))\n\n(defun org-dialog--pointer-at-prompt-p ()\n  \"Return non-nil if point is anywhere inside a PROMPT block.\"\n  (not (null (org-dialog--prompt-block-at-point))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :results output\n  ;; Literate programming test of org-dialog--pointer-at-prompt-p\n  (with-temp-buffer\n    (org-mode)\n    (insert \"#+TITLE: A test org document\\n\")\n    (insert \"* Introduction\\n\")\n    (princ (format \"On top of PROMPT block? %s\\n\" (org-dialog--pointer-at-prompt-p)))\n    (insert \"#+begin_prompt\\n\")\n    (insert \"A request for an LLM\\n\")\n    (insert \"#+end_prompt\\n\")\n    (goto-char (point-min))\n    (re-search-forward \"A request for an LLM\")\n    (princ (format \"On top of PROMPT block? %s\" (org-dialog--pointer-at-prompt-p))))\n#+end_src\n\n** Parse org buffer into internal represenation of user/assistant messages\n\nLLM APIs expect a sequence of alternating system, user, and assistant\nmessages.\n\nAssistant messages map directly to the contents of ASSISTANT blocks.\n\nUser messages are constructed from all text before and between\nASSISTANT blocks.\n\nDev insight: Sending the entire document as a single user message\nwould lose this structure. Keeping prior responses as assistant\nmessages informs the model of what it has already said, which affects\nfuture behavior. An important consequence is that you can edit an\nassistant response to reflect the style or content you would have\npreferred. On the next inference, the model will continue as if it had\nreplied that way, allowing deliberate steering of tone and style.\n\n** Collecting message contents\n#+begin_src emacs-lisp\n  (defun org-dialog--collect-messages (&optional limit)\n    \"Return ordered list of (role . content) from current buffer.\n  Everything up to and including each PROMPT block is a single user message.\n  ASSISTANT blocks become assistant messages.\n  When LIMIT is non-nil, only consider buffer content up to that position.\"\n    (let ((elements (org-element-parse-buffer))\n  \t(messages '())\n  \t(pos (point-min))\n  \t(bound (or limit (point-max))))\n      (org-element-map elements 'special-block\n        (lambda (el)\n  \t(let* ((type (upcase (org-element-property :type el)))\n  \t       (begin (org-element-property :begin el))\n  \t       (end (org-element-property :end el))\n  \t       (contents-begin (org-element-property :contents-begin el))\n  \t       (contents-end (org-element-property :contents-end el)))\n  \t  (when (<= contents-end bound)\n  \t    (let ((content-up-to-el (buffer-substring-no-properties\n  \t\t\t\t     pos begin))\n  \t\t  (content (buffer-substring-no-properties contents-begin contents-end)))\n  \t      (cond\n  \t       ((string= type \"PROMPT\")\n  \t\t(push (cons \"user\"\n  \t\t\t    (format \"<doc>%s</doc><task>%s</task>\"\n  \t\t\t\t    content-up-to-el content))\n  \t\t      messages)\n  \t\t(setq pos end))\n  \t       ((string= type \"ASSISTANT\")\n  \t\t(push (cons \"assistant\" content) messages)\n  \t\t(setq pos end))))))))\n      (nreverse messages)))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example :results value pp\n  ;; Literate test for org-dialog--collect-messages\n  ;; Build a small org buffer with prompt and assistant blocks\n  ;; Then assert message ordering and roles\n\n  (with-temp-buffer\n    (org-mode)\n    (insert \"Intro text\\n\\n\")\n    (insert \"#+begin_prompt\\nAsk something\\n#+end_prompt\\n\\n\")\n    (insert \"#+begin_assistant\\nAnswer one\\n#+end_assistant\\n\\n\")\n    (insert \"More text\\n\")\n    (insert \"#+begin_prompt\\nAsk something else\\n#+end_prompt\\n\\n\")\n    (forward-line -1)\n    (org-dialog--collect-messages))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n((\"user\" . \"<doc>Intro text\\n\\n</doc><task>Ask something\\n</task>\")\n (\"assistant\" . \"Answer one\\n\")\n (\"user\" . \"<doc>More text\\n</doc><task>Ask something else\\n</task>\"))\n#+end_example\n\n** Read config from buffer keywords\nObtain the necessary LLM request parameters from buffer level keywords.  \nThese include model, endpoint, api key, and optional system prompt.  \nThey are read via `org-collect-keywords` before issuing the network request.\n\n#+begin_src org :tangle no\n  ,#+DIALOG_MODEL: gpt-5.2-chat\n  ,#+DIALOG_ENDPOINT: https://example.openai.azure.com/openai/v1/chat/completions\n  ,#+DIALOG_API_KEY: INFERENCE_API_KEY\n  ,#+DIALOG_SYSTEM: You are a concise technical co-author.\n#+end_src\n\n#+begin_src emacs-lisp\n  (defun org-dialog--collect-keywords ()\n    (let ((kws (org-collect-keywords\n  \t      '(\"DIALOG_MODEL\" \"DIALOG_ENDPOINT\" \"DIALOG_API_KEY\" \"DIALOG_SYSTEM\"))))\n      (list :model (cadr (assoc \"DIALOG_MODEL\" kws))\n  \t  :endpoint (cadr (assoc \"DIALOG_ENDPOINT\" kws))\n  \t  :api-key (and (cadr (assoc \"DIALOG_API_KEY\" kws))\n  \t\t\t(getenv (cadr (assoc \"DIALOG_API_KEY\" kws))))\n  \t  :system (cadr (assoc \"DIALOG_SYSTEM\" kws)))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example :results value pp\n;; Literate test for org-dialog--collect-keywords\n;; Verify buffer keywords are read and mapped correctly\n\n(with-temp-buffer\n  (org-mode)\n  (insert \"#+DIALOG_MODEL: test-model\\n\")\n  (insert \"#+DIALOG_ENDPOINT: https://example.test/chat\\n\")\n  (insert \"#+DIALOG_API_KEY: TEST_ENV_KEY\\n\")\n  (insert \"#+DIALOG_SYSTEM: Test system prompt\\n\")\n  (setenv \"TEST_ENV_KEY\" \"secret123\")\n  (org-dialog--collect-keywords))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n(:model \"test-model\" :endpoint \"https://example.test/chat\" :api-key\n\t\"secret123\" :system \"Test system prompt\")\n#+end_example\n\n** Prepare LLM request\nCreate a request compatible with https://platform.openai.com/docs/api-reference/chat/create\n\n#+begin_src emacs-lisp\n  (defun org-dialog--prepare-request (messages config)\n    \"Build a complete LLM request from MESSAGES and CONFIG.\n  MESSAGES is the output of `org-dialog--collect-messages'.\n  CONFIG is the output of `org-dialog--config'.\n  Returns plist (:endpoint :headers :payload).\"\n    (let* ((system (plist-get config :system))\n  \t (api-messages\n  \t  (vconcat\n  \t   (when system\n  \t     (vector `((role . \"developer\") (content . ,system))))\n  \t   (mapcar (lambda (m)\n  \t\t     `((role . ,(car m)) (content . ,(cdr m))))\n  \t\t   messages))))\n      (list\n       :endpoint (plist-get config :endpoint)\n       :headers `((\"Content-Type\" . \"application/json\")\n  \t\t(\"Authorization\" . ,(concat \"Bearer \" (plist-get config :api-key))))\n       :payload (encode-coding-string\n  \t       (json-serialize\n  \t\t`((model . ,(plist-get config :model))\n  \t\t  (messages . ,api-messages)))\n  \t       'utf-8))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example :results value pp\n;; Literate test for org-dialog--prepare-request\n\n(let* ((messages '((\"user\" . \"Hello\") (\"assistant\" . \"Hi\")))\n       (config '(:model \"test-model\"\n                :endpoint \"https://example.test/chat\"\n                :api-key \"secret\"\n                :system \"System prompt\")))\n       (org-dialog--prepare-request messages config)))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n(:endpoint \"https://example.test/chat\"\n :headers ((\"Content-Type\" . \"application/json\")\n\t    (\"Authorization\" . \"Bearer secret\"))\n :payload \"{\\\"model\\\":\\\"test-model\\\",\\\"messages\\\":[{\\\"role\\\":\\\"developer\\\",\\\"content\\\":\\\"System prompt\\\"},{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Hello\\\"},{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":\\\"Hi\\\"}]}\")\n#+end_example\n\n** Execute LLM API reqeuest\nWe use =plz= package for this.\n\n#+begin_src emacs-lisp\n  (defun org-dialog--execute-request (request callback)\n    \"Execute LLM REQUEST and call CALLBACK with response string.\"\n    (require 'plz)\n    (plz 'post\n      (plist-get request :endpoint)\n      :headers (plist-get request :headers)\n      :body (plist-get request :payload)\n      :as 'string\n      :then (lambda (resp)\n              (funcall callback resp))\n      :else (lambda (err)\n              (message \"org-dialog request failed: %s\" err))))\n#+end_src\n\n</doc><task>write a literate programming style test, I think you will need to use\nthe actual values from my keywords since this will hit a real endpoint\n</task>"
+    },
+    {
+      "role": "user",
+      "content": "<doc>#+begin_src emacs-lisp :tangle no :wrap example \n;; Literate integration test for full org-dialog request cycle.\n;; This test uses real buffer keywords and hits the configured endpoint.\n;; It is not suitable for automated CI.\n\n(with-temp-buffer\n  (org-mode)\n  ;; buffer level configuration\n  (insert \"#+DIALOG_MODEL: gpt-5.2-chat\\n\")\n  (insert \"#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\\n\")\n  (insert \"#+DIALOG_API_KEY: INFERENCE_API_KEY\\n\")\n  (insert \"#+DIALOG_SYSTEM: You are a dry concise test assistant.\\n\\n\")\n\n  ;; minimal document with a prompt\n  (insert \"* Test\\n\")\n  (insert \"This is a test document.\\n\\n\")\n  (insert \"#+begin_prompt\\n\")\n  (insert \"Reply with the word OK.\\n\")\n  (insert \"#+end_prompt\\n\")\n\n  ;; collect inputs\n  (let* ((messages (org-dialog--collect-messages))\n         (config (org-dialog--collect-keywords))\n         (request (org-dialog--prepare-request messages config))\n         (done nil))\n    (org-dialog--execute-request\n     request\n     (lambda (resp)\n       (setq done resp)))\n    ;; naive wait for async completion\n    (while (not done)\n      (sleep-for 1))\n    done))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n{\n  \"choices\": [\n    {\n      \"content_filter_results\": {\n        \"hate\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"protected_material_code\": {\n          \"filtered\": false,\n          \"detected\": false\n        },\n        \"protected_material_text\": {\n          \"filtered\": false,\n          \"detected\": false\n        },\n        \"self_harm\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"sexual\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"violence\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        }\n      },\n      \"finish_reason\": \"stop\",\n      \"index\": 0,\n      \"logprobs\": null,\n      \"message\": {\n        \"annotations\": [],\n        \"content\": \"OK\",\n        \"refusal\": null,\n        \"role\": \"assistant\"\n      }\n    }\n  ],\n  \"created\": 1770581162,\n  \"id\": \"chatcmpl-D75KcqWoYy6C49fmuK8pjjEMEQGmo\",\n  \"model\": \"gpt-5.2-chat-2025-12-11\",\n  \"object\": \"chat.completion\",\n  \"prompt_filter_results\": [\n    {\n      \"prompt_index\": 0,\n      \"content_filter_results\": {\n        \"hate\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"jailbreak\": {\n          \"filtered\": false,\n          \"detected\": false\n        },\n        \"self_harm\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"sexual\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        },\n        \"violence\": {\n          \"filtered\": false,\n          \"severity\": \"safe\"\n        }\n      }\n    }\n  ],\n  \"system_fingerprint\": null,\n  \"usage\": {\n    \"completion_tokens\": 11,\n    \"completion_tokens_details\": {\n      \"accepted_prediction_tokens\": 0,\n      \"audio_tokens\": 0,\n      \"reasoning_tokens\": 0,\n      \"rejected_prediction_tokens\": 0\n    },\n    \"prompt_tokens\": 114,\n    \"prompt_tokens_details\": {\n      \"audio_tokens\": 0,\n      \"cached_tokens\": 0\n    },\n    \"total_tokens\": 125\n  }\n}\n#+end_example\n\n** Inserting content wrapped in an ASSISTANT block right after a PROMPT block\n#+begin_src emacs-lisp\n  (defun org-dialog--insert-assistant-after-prompt (buffer prompt-end content)\n    \"Insert or replace ASSISTANT block after PROMPT in BUFFER.\"\n    (with-current-buffer buffer\n      (let ((end (copy-marker prompt-end)))\n        (save-excursion\n  \t(goto-char end)\n  \t(skip-chars-forward \" \\t\\r\\n\")\n  \t(let ((next (org-element-at-point)))\n  \t  (when (and (eq (org-element-type next) 'special-block)\n  \t\t     (string= (upcase (org-element-property :type next)) \"ASSISTANT\"))\n  \t    (delete-region (org-element-property :begin next)\n  \t\t\t   (org-element-property :end next))))\n  \t(delete-region end (progn (goto-char end)\n  \t\t\t\t  (skip-chars-forward \" \\t\\r\\n\")\n  \t\t\t\t  (point)))\n  \t(goto-char end)\n  \t(insert \"\\n#+begin_assistant\\n\"\n  \t\tcontent\n  \t\t(unless (string-suffix-p \"\\n\" content) \"\\n\")\n  \t\t\"#+end_assistant\\n\")))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example\n;; Literate test for org-dialog--insert-assistant-after-prompt.\n;; Verifies insert and replace behavior, independent of point.\n\n(with-temp-buffer\n  (org-mode)\n  (insert \"* Test\\n\\n\")\n  (insert \"#+begin_prompt\\nPrompt text\\n#+end_prompt\\n\")\n  (let ((buf (current-buffer))\n        (prompt-end (save-excursion\n                      (goto-char (point-min))\n                      (search-forward \"#+end_prompt\")\n                      (line-beginning-position 2))))\n    ;; first insertion\n    (org-dialog--insert-assistant-after-prompt\n     buf prompt-end \"First response\")\n    ;; replacement\n    (org-dialog--insert-assistant-after-prompt\n     buf prompt-end \"Second response\")\n    (buffer-string)))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n,* Test\n\n,#+begin_prompt\nPrompt text\n,#+end_prompt\n\n,#+begin_assistant\nSecond response\n,#+end_assistant\n#+end_example\n\n</doc><task>we should always leave one line of separation between prompt and assistant blocks\n</task>"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes. Insert an extra newline before the ASSISTANT block.\n\nChange insert to:\n\n,#+begin_src emacs-lisp\n(insert \"\\n\\n#+begin_assistant\\n\"\n        content\n        (unless (string-suffix-p \"\\n\" content) \"\\n\")\n        \"#+end_assistant\")\n,#+end_src\n"
+    },
+    {
+      "role": "user",
+      "content": "<doc></doc><task>wont that affect when there are already several newlines after prompt block?\n</task>"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes. Better normalize spacing.\n\nAfter deleting any existing ASSISTANT, do:\n\n,#+begin_src emacs-lisp\n(delete-region end (progn (goto-char end)\n                          (skip-chars-forward \" \\t\\r\\n\")\n                          (point)))\n(insert \"\\n\\n#+begin_assistant\\n\"\n        content\n        (unless (string-suffix-p \"\\n\" content) \"\\n\")\n        \"#+end_assistant\")\n,#+end_src\n"
+    },
+    {
+      "role": "user",
+      "content": "<doc>** Executing a PROMPT block\n#+begin_src emacs-lisp\n  (defun org-dialog-execute-prompt ()\n    \"Execute PROMPT block at point and insert ASSISTANT response.\"\n    (interactive)\n    (let ((block (org-dialog--prompt-block-at-point)))\n      (unless block\n        (user-error \"Not on a PROMPT block\"))\n      (let* ((debug (org-dialog--prompt-debug-p block))\n  \t   (prompt-end\n  \t    (save-excursion\n  \t      (goto-char (org-element-property :contents-end block))\n  \t      (forward-line 1)\n  \t      (point)))\n  \t   (buffer (current-buffer))\n  \t   (messages (org-dialog--collect-messages prompt-end))\n  \t   (config (org-dialog--collect-keywords))\n  \t   (request (org-dialog--prepare-request messages config)))\n        (org-dialog--execute-request\n         request\n         (lambda (resp)\n  \t (let* ((json (json-parse-string resp :object-type 'alist))\n  \t\t(choices (alist-get 'choices json))\n  \t\t(msg (alist-get 'message (aref choices 0)))\n  \t\t(content (alist-get 'content msg))\n  \t\t(final\n  \t\t (if debug\n  \t\t     (format \"Response:\\n%s\\n\\nRequest:\\n%s\"\n  \t\t\t     resp (plist-get request :payload))\n  \t\t   content)))\n  \t   (org-dialog--insert-assistant-after-prompt\n  \t    buffer prompt-end final)))))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example\n;; Literate integration test for org-dialog-execute-prompt.\n;; Requires real buffer keywords and a live endpoint.\n;; Execute with point inside the PROMPT block.\n\n(with-temp-buffer\n  (org-mode)\n  ;; config\n  (insert \"#+DIALOG_MODEL: gpt-5.2-chat\\n\")\n  (insert \"#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\\n\")\n  (insert \"#+DIALOG_API_KEY: INFERENCE_API_KEY\\n\")\n  (insert \"#+DIALOG_SYSTEM: You are a dry concise test assistant.\\n\\n\")\n\n  ;; document\n  (insert \"* Test\\n\")\n  (insert \"Prelude text.\\n\\n\")\n  (insert \"#+begin_prompt\\n\")\n  (insert \"Reply with OK.\\n\")\n  (insert \"#+end_prompt\\n\")\n\n  ;; place point inside prompt\n  (goto-char (point-min))\n  (search-forward \"Reply with OK\")\n\n  ;; execute\n  (org-dialog-execute-prompt)\n\n  ;; wait for async completion\n  (while (not (save-excursion\n                (goto-char (point-min))\n                (search-forward \"#+begin_assistant\" nil t)))\n    (sleep-for 1))\n\n  ;; return buffer for inspection\n  (buffer-string))\n#+end_src\n\n#+RESULTS:\n#+begin_example\n,#+DIALOG_MODEL: gpt-5.2-chat\n,#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n,#+DIALOG_API_KEY: INFERENCE_API_KEY\n,#+DIALOG_SYSTEM: You are a dry concise test assistant.\n\n,* Test\nPrelude text.\n\n,#+begin_prompt\nReply with OK.\n,#+end_prompt\n\n,#+begin_assistant\nOK\n,#+end_assistant\n#+end_example\n\n*** IN-PROGRESS Debugging and learning from internals\nIf a PROMPT block is executed with the header argument =:debug yes=,\nthe generated ASSISTANT block includes the full request payload and\nthe full raw response. This is useful for debugging, inspecting model\ninputs and outputs, and understanding the underlying API behavior.\n\n#+begin_src emacs-lisp\n  (defun org-dialog--prompt-debug-p (block)\n    (let ((params (org-element-property :parameters block)))\n      (and params (string-match-p \":debug\\\\s-+yes\" params))))\n#+end_src\n\n#+begin_src emacs-lisp :tangle no :wrap example\n  ;; Literate integration test for PROMPT :debug yes.\n  ;; Verifies that assistant content includes request payload and raw response.\n\n  (with-temp-buffer\n    (org-mode)\n    ;; config\n    (insert \"#+DIALOG_MODEL: gpt-5.2-chat\\n\")\n    (insert \"#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\\n\")\n    (insert \"#+DIALOG_API_KEY: INFERENCE_API_KEY\\n\")\n    (insert \"#+DIALOG_SYSTEM: You are a dry concise test assistant.\\n\\n\")\n\n    ;; document with debug prompt\n    (insert \"* Debug Test\\n\")\n    (insert \"#+begin_prompt :debug yes\\n\")\n    (insert \"Reply with OK.\\n\")\n    (insert \"#+end_prompt\\n\")\n\n    ;; execute\n    (goto-char (point-min))\n    (search-forward \"Reply with OK\")\n    (org-dialog-execute-prompt)\n\n    ;; wait for assistant\n    (while (not (save-excursion\n                  (goto-char (point-min))\n                  (search-forward \"#+begin_assistant\" nil t)))\n      (sleep-for 5))\n\n    ;; extract assistant contents\n    (save-excursion\n      (goto-char (point-min))\n      (search-forward \"#+begin_assistant\")\n      (let ((beg (line-beginning-position 2)))\n        (search-forward \"#+end_assistant\")\n        (buffer-substring-no-properties beg (line-beginning-position 0)))))\n#+end_src\n\n</doc><task>Test. Just reply with the model you are.\n</task>"
+    }
+  ]
+}
+#+end_assistant
+
 ** Minor mode
 #+begin_src emacs-lisp
 (defvar org-dialog-mode-map
@@ -621,22 +812,3 @@ OK
 (provide 'org-dialog)
 #+end_src
 
-** Next steps
-#+begin_prompt
-what's next, how can we improve?
-#+end_prompt
-
-
-#+begin_assistant
-Concise roadmap:
-
-- Stream responses and insert incrementally.
-- Cursor and window preservation.
-- Prompt scoping. Execute up to point, not full buffer.
-- Error surfacing in an ASSISTANT or ERROR block.
-- Model params keywords: temperature, max tokens.
-- Async cancel and retry.
-- History trimming for long docs.
-- Tests for nested blocks and edits.
-- Documentation and example workflows.
-#+end_assistant

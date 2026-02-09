@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- 2026-02-09 Mon 00:01 -->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>org-dialog</title>
+<meta name="author" content="Pablo Munoz Haro" />
+<meta name="generator" content="Org Mode" />
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+<link rel="stylesheet" href="org-dialog.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lisp.min.js"></script>
+<script>document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('pre.src').forEach(pre=>{try{var r=hljs.highlight(pre.textContent,{language:'lisp',ignoreIllegals:true});pre.innerHTML=r.value;pre.classList.add('hljs')}catch(e){}}))</script>
+</head>
+<body>
+<div id="content" class="content">
+<h1 class="title">org-dialog
+<br>
+<span class="subtitle">Executable PROMPT blocks for Emacs Org Mode</span>
+</h1>
+<div id="table-of-contents" role="doc-toc">
+<h2>Table of Contents</h2>
+<div id="text-table-of-contents" role="doc-toc">
+<ul>
+<li><a href="#org36570d0">Scaffolding</a></li>
+<li><a href="#org48adfa5">Introduction</a></li>
+<li><a href="#org4503449">Key functionality</a>
+<ul>
+<li><a href="#org85b4f28">Detect if pointer is at a PROMPT block</a></li>
+<li><a href="#org27211d2">Parse org buffer into internal represenation of user/assistant messages</a></li>
+<li><a href="#org993cc98">Collecting message contents</a></li>
+<li><a href="#orgf1545d7">Read config from buffer keywords</a></li>
+<li><a href="#org77cef87">Prepare LLM request</a></li>
+<li><a href="#orge8e65cc">Execute LLM API request</a></li>
+<li><a href="#orga569c7e">Inserting content wrapped in an ASSISTANT block right after a PROMPT block</a></li>
+<li><a href="#orgde19f3e">Executing a PROMPT block</a></li>
+<li><a href="#orgbd5106a">Debugging and learning from internals</a></li>
+</ul>
+</li>
+<li><a href="#orgb26fe80">User experience</a>
+<ul>
+<li><a href="#org0ef7815">ASSISTANT blocks unique look</a></li>
+</ul>
+</li>
+<li><a href="#orgdc46970">Utilities</a>
+<ul>
+<li><a href="#orgf0713e3">Timestamps</a></li>
+</ul>
+</li>
+<li><a href="#org927b386">Footer</a>
+<ul>
+<li><a href="#orgbeaef32">Minor mode</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</div>
+<div id="outline-container-org36570d0" class="outline-2">
+<h2 id="org36570d0">Scaffolding</h2>
+<div class="outline-text-2" id="text-org36570d0">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;;; org-dialog.el --- Introduces executable PROMPT org blocks in org-mode -*- lexical-binding: t; -*-
+;; Author: Pablo
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (org "9.0"))
+
+;;; Code:
+(require 'org)
+(require 'org-element)
+(require 'json)
+(require 'url)
+</pre>
+</div>
+</div>
+</div>
+<div id="outline-container-org48adfa5" class="outline-2">
+<h2 id="org48adfa5">Introduction</h2>
+<div class="outline-text-2" id="text-org48adfa5">
+<p>
+Goal extend Emacs OrgMode with a new kind of block: PROMPT.
+</p>
+
+<p>
+As the user is authoring an org text, they can put down a prompt block
+</p>
+
+<div class="org-src-container">
+<pre class="src src-org">#+TITLE: LLMs as co-author of literate programming documents
+
+Large language models make natural co-authors for literate
+programming, where explanation and code are interwoven into a single
+readable narrative. Literate programming demands not just correct code
+but clear reasoning - a task that plays to an LLM's strengths. By
+partnering with a human author, an LLM can draft prose, suggest code,
+and help maintain a coherent narrative, making it easier to produce
+documents that read as well as they run.
+
+#+begin_prompt
+What should be the TOC for this document?
+#+end_prompt
+</pre>
+</div>
+
+<p>
+A prompt block is executed by placing point anywhere inside it and
+pressing <code>C-c C-c</code>. The system takes the org buffer up to the end of
+that PROMPT block, converts it into an LLM request, sends it, and
+receives a response. The response is then inserted into an ASSISTANT
+block immediately after the PROMPT block. The user can continue
+editing the document using the response, or directly incorporate parts
+of it into the text.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-org">#+TITLE: LLMs as co-author of literate programming documents
+
+Large language models make natural co-authors for literate
+programming, where explanation and code are interwoven into a single
+readable narrative.
+
+#+begin_prompt
+What should be the TOC for this document?
+#+end_prompt
+
+#+begin_assistant
+* Introduction
+* What is Literate Programming
+* Why LLMs are Good Co-authors
+* Workflow and Tooling
+* Examples
+* Limitations and Caveats
+* Conclusion
+#+end_assistant
+</pre>
+</div>
+</div>
+</div>
+<div id="outline-container-org4503449" class="outline-2">
+<h2 id="org4503449">Key functionality</h2>
+<div class="outline-text-2" id="text-org4503449">
+</div>
+<div id="outline-container-org85b4f28" class="outline-3">
+<h3 id="org85b4f28">Detect if pointer is at a PROMPT block</h3>
+<div class="outline-text-3" id="text-org85b4f28">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--prompt-block-at-point ()
+  "Return the PROMPT special-block element at point, or nil."
+  (let ((el (org-element-context)))
+    (while (and el (not (eq (org-element-type el) 'special-block)))
+      (setq el (org-element-property :parent el)))
+    (and el
+         (string-equal (upcase (org-element-property :type el)) "PROMPT")
+         el)))
+
+(defun org-dialog--pointer-at-prompt-p ()
+  "Return non-nil if point is anywhere inside a PROMPT block."
+  (not (null (org-dialog--prompt-block-at-point))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate programming test of org-dialog--pointer-at-prompt-p
+(with-temp-buffer
+  (org-mode)
+  (insert "#+TITLE: A test org document\n")
+  (insert "* Introduction\n")
+  (princ (format "On top of PROMPT block? %s\n" (org-dialog--pointer-at-prompt-p)))
+  (insert "#+begin_prompt\n")
+  (insert "A request for an LLM\n")
+  (insert "#+end_prompt\n")
+  (goto-char (point-min))
+  (re-search-forward "A request for an LLM")
+  (princ (format "On top of PROMPT block? %s" (org-dialog--pointer-at-prompt-p))))
+</pre>
+</div>
+</div>
+</div>
+<div id="outline-container-org27211d2" class="outline-3">
+<h3 id="org27211d2">Parse org buffer into internal represenation of user/assistant messages</h3>
+<div class="outline-text-3" id="text-org27211d2">
+<p>
+LLM APIs expect a sequence of alternating system, user, and assistant
+messages.
+</p>
+
+<p>
+Assistant messages map directly to the contents of ASSISTANT blocks.
+</p>
+
+<p>
+User messages are constructed from all text before and between
+ASSISTANT blocks.
+</p>
+
+<p>
+Dev insight: Sending the entire document as a single user message
+would lose this structure. Keeping prior responses as assistant
+messages informs the model of what it has already said, which affects
+future behavior. An important consequence is that you can edit an
+assistant response to reflect the style or content you would have
+preferred. On the next inference, the model will continue as if it had
+replied that way, allowing deliberate steering of tone and style.
+</p>
+</div>
+</div>
+<div id="outline-container-org993cc98" class="outline-3">
+<h3 id="org993cc98">Collecting message contents</h3>
+<div class="outline-text-3" id="text-org993cc98">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--collect-messages (&amp;optional limit)
+  "Return ordered list of (role . content) from current buffer.
+Everything up to and including each PROMPT block is a single user message.
+ASSISTANT blocks become assistant messages.
+When LIMIT is non-nil, only consider buffer content up to that position."
+  (let ((elements (org-element-parse-buffer))
+        (messages '())
+        (pos (point-min))
+        (bound (or limit (point-max))))
+    (org-element-map elements 'special-block
+      (lambda (el)
+        (let* ((type (upcase (org-element-property :type el)))
+               (begin (org-element-property :begin el))
+               (end (org-element-property :end el))
+               (contents-begin (org-element-property :contents-begin el))
+               (contents-end (org-element-property :contents-end el)))
+          (when (&lt;= contents-end bound)
+            (let ((content-up-to-el (buffer-substring-no-properties
+                                     pos begin))
+                  (content (buffer-substring-no-properties contents-begin contents-end)))
+              (cond
+               ((string= type "PROMPT")
+                (push (cons "user"
+                            (format "&lt;doc&gt;%s&lt;/doc&gt;&lt;task&gt;%s&lt;/task&gt;"
+                                    content-up-to-el content))
+                      messages)
+                (setq pos end))
+               ((string= type "ASSISTANT")
+                (push (cons "assistant" content) messages)
+                (setq pos end))))))))
+    (nreverse messages)))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate test for org-dialog--collect-messages
+;; Build a small org buffer with prompt and assistant blocks
+;; Then assert message ordering and roles
+
+(with-temp-buffer
+  (org-mode)
+  (insert "Intro text\n\n")
+  (insert "#+begin_prompt\nAsk something\n#+end_prompt\n\n")
+  (insert "#+begin_assistant\nAnswer one\n#+end_assistant\n\n")
+  (insert "More text\n")
+  (insert "#+begin_prompt\nAsk something else\n#+end_prompt\n\n")
+  (forward-line -1)
+  (org-dialog--collect-messages))
+</pre>
+</div>
+
+<pre class="example" id="org7a926da">
+(("user" . "&lt;doc&gt;Intro text\n\n&lt;/doc&gt;&lt;task&gt;Ask something\n&lt;/task&gt;")
+ ("assistant" . "Answer one\n")
+ ("user" . "&lt;doc&gt;More text\n&lt;/doc&gt;&lt;task&gt;Ask something else\n&lt;/task&gt;"))
+</pre>
+</div>
+</div>
+<div id="outline-container-orgf1545d7" class="outline-3">
+<h3 id="orgf1545d7">Read config from buffer keywords</h3>
+<div class="outline-text-3" id="text-orgf1545d7">
+<p>
+Obtain the necessary LLM request parameters from buffer level keywords.  
+These include model, endpoint, api key, and optional system prompt.  
+They are read via `org-collect-keywords` before issuing the network request.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-org">#+DIALOG_MODEL: gpt-5.2-chat
+#+DIALOG_ENDPOINT: https://example.openai.azure.com/openai/v1/chat/completions
+#+DIALOG_API_KEY: INFERENCE_API_KEY
+#+DIALOG_SYSTEM: You are a concise technical co-author.
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--collect-keywords ()
+  (let ((kws (org-collect-keywords
+              '("DIALOG_MODEL" "DIALOG_ENDPOINT" "DIALOG_API_KEY" "DIALOG_SYSTEM"))))
+    (list :model (cadr (assoc "DIALOG_MODEL" kws))
+          :endpoint (cadr (assoc "DIALOG_ENDPOINT" kws))
+          :api-key (and (cadr (assoc "DIALOG_API_KEY" kws))
+                        (getenv (cadr (assoc "DIALOG_API_KEY" kws))))
+          :system (cadr (assoc "DIALOG_SYSTEM" kws)))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate test for org-dialog--collect-keywords
+;; Verify buffer keywords are read and mapped correctly
+
+(with-temp-buffer
+  (org-mode)
+  (insert "#+DIALOG_MODEL: test-model\n")
+  (insert "#+DIALOG_ENDPOINT: https://example.test/chat\n")
+  (insert "#+DIALOG_API_KEY: TEST_ENV_KEY\n")
+  (insert "#+DIALOG_SYSTEM: Test system prompt\n")
+  (setenv "TEST_ENV_KEY" "secret123")
+  (org-dialog--collect-keywords))
+</pre>
+</div>
+
+<pre class="example" id="orgbb9be0e">
+(:model "test-model" :endpoint "https://example.test/chat" :api-key
+	"secret123" :system "Test system prompt")
+</pre>
+</div>
+</div>
+<div id="outline-container-org77cef87" class="outline-3">
+<h3 id="org77cef87">Prepare LLM request</h3>
+<div class="outline-text-3" id="text-org77cef87">
+<p>
+Create a request compatible with <a href="https://platform.openai.com/docs/api-reference/chat/create">https://platform.openai.com/docs/api-reference/chat/create</a>
+</p>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--prepare-request (messages config)
+  "Build a complete LLM request from MESSAGES and CONFIG.
+MESSAGES is the output of `org-dialog--collect-messages'.
+CONFIG is the output of `org-dialog--config'.
+Returns plist (:endpoint :headers :payload)."
+  (let* ((system (plist-get config :system))
+         (api-messages
+          (vconcat
+           (when system
+             (vector `((role . "developer") (content . ,system))))
+           (mapcar (lambda (m)
+                     `((role . ,(car m)) (content . ,(cdr m))))
+                   messages))))
+    (list
+     :endpoint (plist-get config :endpoint)
+     :headers `(("Content-Type" . "application/json")
+                ("Authorization" . ,(concat "Bearer " (plist-get config :api-key))))
+     :payload (encode-coding-string
+               (json-serialize
+                `((model . ,(plist-get config :model))
+                  (messages . ,api-messages)))
+               'utf-8))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate test for org-dialog--prepare-request
+
+(let* ((messages '(("user" . "Hello") ("assistant" . "Hi")))
+       (config '(:model "test-model"
+                :endpoint "https://example.test/chat"
+                :api-key "secret"
+                :system "System prompt")))
+       (org-dialog--prepare-request messages config)))
+</pre>
+</div>
+
+<pre class="example" id="orgde1e073">
+(:endpoint "https://example.test/chat"
+ :headers (("Content-Type" . "application/json")
+	    ("Authorization" . "Bearer secret"))
+ :payload "{\"model\":\"test-model\",\"messages\":[{\"role\":\"developer\",\"content\":\"System prompt\"},{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hi\"}]}")
+</pre>
+</div>
+</div>
+<div id="outline-container-orge8e65cc" class="outline-3">
+<h3 id="orge8e65cc">Execute LLM API request</h3>
+<div class="outline-text-3" id="text-orge8e65cc">
+<p>
+We use <code>plz</code> package for this.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--execute-request (request callback)
+  "Execute LLM REQUEST and call CALLBACK with response string."
+  (require 'plz)
+  (plz 'post
+    (plist-get request :endpoint)
+    :headers (plist-get request :headers)
+    :body (plist-get request :payload)
+    :as 'string
+    :then (lambda (resp)
+            (funcall callback (cons t resp)))
+    :else (lambda (err)
+            (funcall callback (cons nil err)))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate integration test for full org-dialog request cycle.
+;; This test uses real buffer keywords and hits the configured endpoint.
+;; It is not suitable for automated CI.
+
+(with-temp-buffer
+  (org-mode)
+  ;; buffer level configuration
+  (insert "#+DIALOG_MODEL: gpt-5.2-chat\n")
+  (insert "#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n")
+  (insert "#+DIALOG_API_KEY: INFERENCE_API_KEY\n")
+  (insert "#+DIALOG_SYSTEM: You are a dry concise test assistant.\n\n")
+
+  ;; minimal document with a prompt
+  (insert "* Test\n")
+  (insert "This is a test document.\n\n")
+  (insert "#+begin_prompt\n")
+  (insert "Reply with the word OK.\n")
+  (insert "#+end_prompt\n")
+
+  ;; collect inputs
+  (let* ((messages (org-dialog--collect-messages))
+         (config (org-dialog--collect-keywords))
+         (request (org-dialog--prepare-request messages config))
+         (done nil))
+    (org-dialog--execute-request
+     request
+     (lambda (resp)
+       (setq done resp)))
+    ;; naive wait for async completion
+    (while (not done)
+      (sleep-for 1))
+    done))
+</pre>
+</div>
+
+<pre class="example" id="org5b24ee4">
+{
+  "choices": [
+    {
+      "content_filter_results": {
+        "hate": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "protected_material_code": {
+          "filtered": false,
+          "detected": false
+        },
+        "protected_material_text": {
+          "filtered": false,
+          "detected": false
+        },
+        "self_harm": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "sexual": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "violence": {
+          "filtered": false,
+          "severity": "safe"
+        }
+      },
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "annotations": [],
+        "content": "OK",
+        "refusal": null,
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1770581162,
+  "id": "chatcmpl-D75KcqWoYy6C49fmuK8pjjEMEQGmo",
+  "model": "gpt-5.2-chat-2025-12-11",
+  "object": "chat.completion",
+  "prompt_filter_results": [
+    {
+      "prompt_index": 0,
+      "content_filter_results": {
+        "hate": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "jailbreak": {
+          "filtered": false,
+          "detected": false
+        },
+        "self_harm": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "sexual": {
+          "filtered": false,
+          "severity": "safe"
+        },
+        "violence": {
+          "filtered": false,
+          "severity": "safe"
+        }
+      }
+    }
+  ],
+  "system_fingerprint": null,
+  "usage": {
+    "completion_tokens": 11,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 0,
+      "audio_tokens": 0,
+      "reasoning_tokens": 0,
+      "rejected_prediction_tokens": 0
+    },
+    "prompt_tokens": 114,
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cached_tokens": 0
+    },
+    "total_tokens": 125
+  }
+}
+</pre>
+</div>
+</div>
+<div id="outline-container-orga569c7e" class="outline-3">
+<h3 id="orga569c7e">Inserting content wrapped in an ASSISTANT block right after a PROMPT block</h3>
+<div class="outline-text-3" id="text-orga569c7e">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--insert-assistant-after-prompt (buffer prompt-end content)
+  "Insert or replace ASSISTANT block after PROMPT in BUFFER."
+  (with-current-buffer buffer
+    (let ((end (copy-marker prompt-end)))
+      (save-excursion
+        (goto-char end)
+        (skip-chars-forward " \t\r\n")
+        (let ((next (org-element-at-point)))
+          (when (and (eq (org-element-type next) 'special-block)
+                     (string= (upcase (org-element-property :type next)) "ASSISTANT"))
+            (delete-region (org-element-property :begin next)
+                           (org-element-property :end next))))
+        (delete-region end (progn (goto-char end)
+                                  (skip-chars-forward " \t\r\n")
+                                  (point)))
+        (goto-char end)
+        (insert "\n#+begin_assistant\n"
+                content
+                (unless (string-suffix-p "\n" content) "\n")
+                "#+end_assistant\n")))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate test for org-dialog--insert-assistant-after-prompt.
+;; Verifies insert and replace behavior, independent of point.
+
+(with-temp-buffer
+  (org-mode)
+  (insert "* Test\n\n")
+  (insert "#+begin_prompt\nPrompt text\n#+end_prompt\n")
+  (let ((buf (current-buffer))
+        (prompt-end (save-excursion
+                      (goto-char (point-min))
+                      (search-forward "#+end_prompt")
+                      (line-beginning-position 2))))
+    ;; first insertion
+    (org-dialog--insert-assistant-after-prompt
+     buf prompt-end "First response")
+    ;; replacement
+    (org-dialog--insert-assistant-after-prompt
+     buf prompt-end "Second response")
+    (buffer-string)))
+</pre>
+</div>
+
+<pre class="example" id="org508a6d2">
+* Test
+
+#+begin_prompt
+Prompt text
+#+end_prompt
+
+#+begin_assistant
+Second response
+#+end_assistant
+</pre>
+</div>
+<div id="outline-container-org3bf444f" class="outline-4">
+<h4 id="org3bf444f">Placeholder ASSISTANT block</h4>
+<div class="outline-text-4" id="text-org3bf444f">
+<p>
+Provide immediate feedback when a PROMPT block is executed, while
+waiting for response.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--insert-assistant-placeholder (buffer prompt-end)
+  "Insert placeholder ASSISTANT block and return marker to its contents."
+  (with-current-buffer buffer
+    (let ((end (copy-marker prompt-end))
+          (marker (make-marker)))
+      (save-excursion
+        (goto-char end)
+        (skip-chars-forward " \t\r\n")
+        (delete-region end (point))
+        (insert "\n\n#+begin_assistant\n"
+                (format "Working... started %s\n" (org-dialog--timestamp))
+                "#+end_assistant\n")
+        (set-marker marker
+                    (save-excursion
+                      (search-backward "#+begin_assistant")
+                      (line-beginning-position 2))))
+      marker)))
+</pre>
+</div>
+</div>
+</div>
+</div>
+<div id="outline-container-orgde19f3e" class="outline-3">
+<h3 id="orgde19f3e">Executing a PROMPT block</h3>
+<div class="outline-text-3" id="text-orgde19f3e">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog-execute-prompt ()
+  "Execute PROMPT block at point and insert ASSISTANT response."
+  (interactive)
+  (let ((block (org-dialog--prompt-block-at-point)))
+    (unless block
+      (user-error "Not on a PROMPT block"))
+    (let* ((debug (org-dialog--prompt-debug-p block))
+           (prompt-end
+            (save-excursion
+              (goto-char (org-element-property :contents-end block))
+              (forward-line 1)
+              (point)))
+           (buffer (current-buffer))
+           (messages (org-dialog--collect-messages prompt-end))
+           (config (org-dialog--collect-keywords))
+           (request (org-dialog--prepare-request messages config))
+           (assistant-marker
+            (org-dialog--insert-assistant-placeholder buffer prompt-end)))
+      (org-dialog--execute-request
+       request
+       (lambda (result)
+         (let* ((ok (car result))
+                (payload (cdr result))
+                (final
+                 (if ok
+                     (let* ((json (json-parse-string payload :object-type 'alist))
+                            (choices (alist-get 'choices json))
+                            (msg (alist-get 'message (aref choices 0)))
+                            (content (alist-get 'content msg)))
+                       (if debug
+                           (format "Response:\n%s\n\nRequest:\n%s"
+                                   payload
+                                   (plist-get request :payload))
+                         content))
+                   (format "Request failed:\n\n%s" payload))))
+                 (org-dialog--insert-assistant-after-prompt
+                  buffer prompt-end final)))))))
+</pre>
+</div>
+
+<pre class="example">
+org-dialog-execute-prompt
+</pre>
+
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate integration test for org-dialog-execute-prompt.
+;; Requires real buffer keywords and a live endpoint.
+;; Execute with point inside the PROMPT block.
+
+(with-temp-buffer
+  (org-mode)
+  ;; config
+  (insert "#+DIALOG_MODEL: gpt-5.2-chat\n")
+  (insert "#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n")
+  (insert "#+DIALOG_API_KEY: INFERENCE_API_KEY\n")
+  (insert "#+DIALOG_SYSTEM: You are a dry concise test assistant.\n\n")
+
+  ;; document
+  (insert "* Test\n")
+  (insert "Prelude text.\n\n")
+  (insert "#+begin_prompt\n")
+  (insert "Reply with OK.\n")
+  (insert "#+end_prompt\n")
+
+  ;; place point inside prompt
+  (goto-char (point-min))
+  (search-forward "Reply with OK")
+
+  ;; execute
+  (org-dialog-execute-prompt)
+
+  ;; wait for async completion
+  (while (not (save-excursion
+                (goto-char (point-min))
+                (search-forward "#+begin_assistant" nil t)))
+    (sleep-for 1))
+
+  ;; return buffer for inspection
+  (buffer-string))
+</pre>
+</div>
+</div>
+</div>
+<div id="outline-container-orgbd5106a" class="outline-3">
+<h3 id="orgbd5106a">Debugging and learning from internals</h3>
+<div class="outline-text-3" id="text-orgbd5106a">
+<p>
+If a PROMPT block is executed with the header argument <code>:debug yes</code>,
+the generated ASSISTANT block includes the full request payload and
+the full raw response. This is useful for debugging, inspecting model
+inputs and outputs, and understanding the underlying API behavior.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--prompt-debug-p (block)
+  (let ((params (org-element-property :parameters block)))
+    (and params (string-match-p ":debug\\s-+yes" params))))
+</pre>
+</div>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">;; Literate integration test for PROMPT :debug yes.
+;; Verifies that assistant content includes request payload and raw response.
+
+(with-temp-buffer
+  (org-mode)
+  ;; config
+  (insert "#+DIALOG_MODEL: gpt-5.2-chat\n")
+  (insert "#+DIALOG_ENDPOINT: https://pablo-ml1b1csr-eastus2.cognitiveservices.azure.com/openai/v1/chat/completions\n")
+  (insert "#+DIALOG_API_KEY: INFERENCE_API_KEY\n")
+  (insert "#+DIALOG_SYSTEM: You are a dry concise test assistant.\n\n")
+
+  ;; document with debug prompt
+  (insert "* Debug Test\n")
+  (insert "#+begin_prompt :debug yes\n")
+  (insert "Reply with OK.\n")
+  (insert "#+end_prompt\n")
+
+  ;; execute
+  (goto-char (point-min))
+  (search-forward "Reply with OK")
+  (org-dialog-execute-prompt)
+
+  ;; wait for assistant
+  (while (not (save-excursion
+                (goto-char (point-min))
+                (search-forward "#+begin_assistant" nil t)))
+    (sleep-for 5))
+
+  ;; extract assistant contents
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward "#+begin_assistant")
+    (let ((beg (line-beginning-position 2)))
+      (search-forward "#+end_assistant")
+      (buffer-substring-no-properties beg (line-beginning-position 0)))))
+</pre>
+</div>
+</div>
+</div>
+</div>
+<div id="outline-container-orgb26fe80" class="outline-2">
+<h2 id="orgb26fe80">User experience</h2>
+<div class="outline-text-2" id="text-orgb26fe80">
+</div>
+<div id="outline-container-org0ef7815" class="outline-3">
+<h3 id="org0ef7815">ASSISTANT blocks unique look</h3>
+<div class="outline-text-3" id="text-org0ef7815">
+<p>
+To make ASSISTANT blocks visually distinct, their contents are
+displayed in a configurable font color and indented to the right. Both
+color and indentation width are user configurable.
+</p>
+
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">    (defgroup org-dialog nil
+      "Visual tweaks for org-dialog."
+      :group 'org)
+
+    (defcustom org-dialog-assistant-indent 2
+      "Indentation width for ASSISTANT blocks."
+      :type 'integer)
+
+    (defface org-dialog-assistant-face
+      '((t :foreground "#b5e890"))
+      "Face for ASSISTANT block contents.")
+
+(defun org-dialog--fontify-assistant (limit)
+  "Search for ASSISTANT block content up to LIMIT for font-lock."
+  (when (re-search-forward "^#\\+begin_assistant[ \t]*\n" limit t)
+    (let ((cbeg (point)))
+      (when (re-search-forward "^#\\+end_assistant" limit t)
+        (let ((cend (line-beginning-position)))
+          (add-text-properties
+           cbeg cend
+           `(line-prefix ,(make-string org-dialog-assistant-indent ?\s)
+             wrap-prefix ,(make-string org-dialog-assistant-indent ?\s)))
+          (set-match-data (list cbeg cend))
+          t)))))
+
+(defun org-dialog--extend-region ()
+  "Extend font-lock region to cover full ASSISTANT blocks."
+  (let ((changed nil))
+    (save-excursion
+      (goto-char font-lock-beg)
+      (when (re-search-backward "^#\\+begin_assistant" nil t)
+        (when (&lt; (point) font-lock-beg)
+          (setq font-lock-beg (point) changed t))))
+    (save-excursion
+      (goto-char font-lock-end)
+      (when (re-search-forward "^#\\+end_assistant" nil t)
+        (when (&gt; (point) font-lock-end)
+          (setq font-lock-end (point) changed t))))
+    changed))
+
+(defun org-dialog--enable-font-lock ()
+  (setq-local font-lock-multiline t)
+  (add-hook 'font-lock-extend-region-functions #'org-dialog--extend-region nil t)
+  (font-lock-add-keywords
+   nil
+   '((org-dialog--fontify-assistant 0 'org-dialog-assistant-face prepend))
+   'append)
+  (font-lock-flush))
+
+(add-hook 'org-dialog-mode-hook #'org-dialog--enable-font-lock)
+</pre>
+</div>
+</div>
+</div>
+</div>
+<div id="outline-container-orgdc46970" class="outline-2">
+<h2 id="orgdc46970">Utilities</h2>
+<div class="outline-text-2" id="text-orgdc46970">
+</div>
+<div id="outline-container-orgf0713e3" class="outline-3">
+<h3 id="orgf0713e3">Timestamps</h3>
+<div class="outline-text-3" id="text-orgf0713e3">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defun org-dialog--timestamp ()
+  (format-time-string "%Y-%m-%d %H:%M:%S"))
+</pre>
+</div>
+</div>
+</div>
+</div>
+<div id="outline-container-org927b386" class="outline-2">
+<h2 id="org927b386">Footer</h2>
+<div class="outline-text-2" id="text-org927b386">
+</div>
+<div id="outline-container-orgbeaef32" class="outline-3">
+<h3 id="orgbeaef32">Minor mode</h3>
+<div class="outline-text-3" id="text-orgbeaef32">
+<div class="org-src-container">
+<pre class="src src-emacs-lisp">(defvar org-dialog-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'org-dialog--maybe-execute)
+    map))
+
+(defun org-dialog--maybe-execute ()
+  (interactive)
+  (if (org-dialog--pointer-at-prompt-p)
+      (org-dialog-execute-prompt)
+    (org-ctrl-c-ctrl-c)))
+
+(define-minor-mode org-dialog-mode
+  "Execute PROMPT blocks with C-c C-c."
+  :lighter " Dialog"
+  :keymap org-dialog-mode-map)
+
+(provide 'org-dialog)
+</pre>
+</div>
+
+<div id="site-footer">
+  <p>Built by <strong>Pablo Munoz Haro</strong></p>
+  <p>
+    <a href="https://x.com/digitalbandido">@digitalbandido</a>
+    &middot;
+    <a href="https://github.com/pamuz">GitHub</a>
+    &middot;
+    <a href="mailto:pablomuha@outlook.com">pablomuha@outlook.com</a>
+  </p>
+  <p class="generator">Generated with <a href="https://www.gnu.org/software/emacs/">Emacs</a> + <a href="https://orgmode.org">Org Mode</a></p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>

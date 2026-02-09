@@ -1,0 +1,553 @@
+/* org-dialog.css -- Hacker terminal theme for org-dialog.org
+   Green phosphor CRT aesthetic. Bootstrap 5 base, highlight.js greenscreen. */
+
+/* ============================================================
+   1. CSS Custom Properties
+   ============================================================ */
+:root {
+  --bg:             #0a0a0a;
+  --bg-raised:      #0f1a0f;
+  --bg-surface:     #111b11;
+  --fg:             #b0ccb0;
+  --fg-bright:      #00ff41;
+  --fg-muted:       #4a7a4a;
+  --border:         #1a3a1a;
+  --border-bright:  #2a5a2a;
+
+  --glow:           #00ff4140;
+  --glow-strong:    #00ff4170;
+
+  --code-bg:        #0c160c;
+  --code-border:    #1a3a1a;
+
+  --prompt-bg:      #1a1400;
+  --prompt-border:  #ff9800;
+  --prompt-fg:      #ffcc80;
+  --prompt-label:   #ff9800;
+
+  --assistant-bg:   #001a1a;
+  --assistant-border:#00bcd4;
+  --assistant-fg:   #80deea;
+  --assistant-label:#00bcd4;
+
+  --example-bg:     #0a100a;
+  --example-fg:     #4a7a4a;
+  --example-border: #1a3a1a;
+
+  --toc-bg:         #0c140c;
+  --toc-border:     #1a3a1a;
+  --toc-hover:      #142a14;
+  --toc-link:       #00cc33;
+
+  --link:           #00ff41;
+  --heading-border: #1a3a1a;
+
+  --badge-bg:       #1a3a1a;
+  --badge-fg:       #4a7a4a;
+}
+
+/* ============================================================
+   2. Body & Layout
+   ============================================================
+   Org exports a flat #content div containing:
+     h1.title > span.subtitle
+     #table-of-contents
+     .outline-2  (repeated)
+     #postamble
+   Grid with explicit column placement keeps TOC in sidebar. */
+
+body {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono",
+    Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+
+/* minmax(0, 1fr) prevents content from blowing out the grid */
+#content {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  column-gap: 2.5rem;
+}
+
+/* Title spans full width */
+h1.title {
+  grid-column: 1 / -1;
+  text-align: left;
+  margin-bottom: 1.5rem;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--fg-bright);
+  text-shadow: 0 0 10px var(--glow), 0 0 30px var(--glow);
+  border: none;
+  letter-spacing: 0.02em;
+}
+
+h1.title::before {
+  content: "> ";
+  color: var(--fg-muted);
+}
+
+/* Subtitle is a span inside h1.title */
+h1.title .subtitle {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--fg-muted);
+  margin-top: 0.4rem;
+  text-shadow: none;
+  letter-spacing: 0;
+}
+
+h1.title .subtitle::before {
+  content: "# ";
+}
+
+/* TOC: column 1, spanning all content rows, sticky */
+#table-of-contents {
+  grid-column: 1;
+  grid-row: 2 / span 99;
+  position: sticky;
+  top: 2rem;
+  align-self: start;
+  background: var(--toc-bg);
+  border: 1px solid var(--toc-border);
+  border-radius: 4px;
+  padding: 1rem 0.75rem;
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+
+/* All content sections: column 2, prevent overflow */
+.outline-2 {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* Custom footer (inside #content grid via #+BEGIN_EXPORT html) */
+#site-footer {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+  margin-top: 3rem;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+#site-footer strong {
+  color: var(--fg-bright);
+  text-shadow: 0 0 6px var(--glow);
+}
+
+#site-footer a {
+  color: var(--toc-link);
+}
+
+#site-footer a:hover {
+  color: var(--fg-bright);
+}
+
+#site-footer p {
+  margin: 0.25rem 0;
+}
+
+#site-footer .generator {
+  margin-top: 0.75rem;
+  font-size: 0.65rem;
+  opacity: 0.6;
+}
+
+/* Hide default org postamble (disabled, but just in case) */
+#postamble {
+  display: none;
+}
+
+/* ============================================================
+   3. Typography
+   ============================================================ */
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-shadow: 0 0 8px var(--glow);
+}
+
+h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--fg-bright);
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--heading-border);
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+  text-shadow: 0 0 8px var(--glow);
+}
+
+h2::before {
+  content: "## ";
+  color: var(--fg-muted);
+}
+
+h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--fg-bright);
+  margin-top: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+
+h3::before {
+  content: "### ";
+  color: var(--fg-muted);
+}
+
+h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--fg-bright);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+h4::before {
+  content: "#### ";
+  color: var(--fg-muted);
+}
+
+p {
+  color: var(--fg);
+}
+
+code, kbd, samp {
+  font-family: inherit;
+  font-size: 0.875em;
+  background-color: var(--code-bg);
+  color: var(--fg-bright);
+  padding: 0.1em 0.3em;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+
+/* ============================================================
+   4. Table of Contents
+   ============================================================ */
+#table-of-contents h2 {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 0.5rem 0;
+  padding: 0 0 0.4rem 0;
+  text-shadow: none;
+}
+
+#table-of-contents h2::before {
+  content: "$ ";
+}
+
+#table-of-contents ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+#table-of-contents ul ul {
+  padding-left: 0.8rem;
+  border-left: 1px solid var(--border);
+}
+
+#table-of-contents li {
+  margin: 0;
+  padding: 0;
+}
+
+#table-of-contents a {
+  display: block;
+  padding: 0.15rem 0.4rem;
+  border-radius: 2px;
+  color: var(--toc-link);
+  text-decoration: none;
+  font-size: 0.78rem;
+  transition: background-color 0.1s, color 0.1s;
+}
+
+#table-of-contents a:hover {
+  background-color: var(--toc-hover);
+  color: var(--fg-bright);
+  text-shadow: 0 0 6px var(--glow);
+}
+
+/* ============================================================
+   5. Source Code Blocks
+   ============================================================ */
+pre {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono",
+    Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 1rem 0;
+}
+
+pre.src {
+  position: relative;
+  padding-top: 2rem;
+  background: var(--code-bg) !important;
+}
+
+/* Language label badge */
+pre.src:before {
+  display: block !important;
+  position: absolute;
+  top: 0.4rem;
+  right: 0.6rem;
+  z-index: 1;
+  font-family: inherit;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  padding: 0.1rem 0.4rem;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+
+/* Override hljs background to match terminal */
+pre.src.hljs,
+.hljs {
+  background: var(--code-bg) !important;
+}
+
+/* Scanline overlay on code blocks for CRT effect */
+pre.src::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  pointer-events: none;
+  border-radius: 4px;
+}
+
+/* ============================================================
+   6. PROMPT Blocks -- Amber Terminal Callout
+   ============================================================ */
+div.prompt {
+  background: var(--prompt-bg);
+  border-left: 3px solid var(--prompt-border);
+  border-radius: 0 4px 4px 0;
+  padding: 0.75rem 1rem 0.75rem 1.25rem;
+  margin: 1rem 0;
+  color: var(--prompt-fg);
+  position: relative;
+}
+
+div.prompt::before {
+  content: "user@prompt $";
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  color: var(--prompt-label);
+  margin-bottom: 0.3rem;
+  text-shadow: 0 0 6px rgba(255, 152, 0, 0.3);
+}
+
+div.prompt p {
+  margin: 0;
+}
+
+/* ============================================================
+   7. ASSISTANT Blocks -- Cyan Terminal Callout
+   ============================================================ */
+div.assistant {
+  background: var(--assistant-bg);
+  border-left: 3px solid var(--assistant-border);
+  border-radius: 0 4px 4px 0;
+  padding: 0.75rem 1rem 0.75rem 1.25rem;
+  margin: 1rem 0;
+  color: var(--assistant-fg);
+  position: relative;
+}
+
+div.assistant::before {
+  content: "llm@assistant >";
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  color: var(--assistant-label);
+  margin-bottom: 0.3rem;
+  text-shadow: 0 0 6px rgba(0, 188, 212, 0.3);
+}
+
+div.assistant p {
+  margin: 0;
+}
+
+/* ============================================================
+   8. Example / Results Blocks
+   ============================================================ */
+pre.example {
+  background-color: var(--example-bg) !important;
+  color: var(--example-fg) !important;
+  font-size: 0.78rem;
+  border: 1px dashed var(--example-border);
+  position: relative;
+}
+
+pre.example::before {
+  content: "=> output";
+  display: block;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin-bottom: 0.4rem;
+}
+
+/* ============================================================
+   9. Responsive
+   ============================================================ */
+@media (max-width: 991.98px) {
+  #content {
+    display: block;
+    padding: 1rem;
+  }
+
+  #table-of-contents {
+    position: static;
+    max-height: none;
+    margin-bottom: 1.5rem;
+    border-radius: 4px;
+  }
+
+  h1.title {
+    font-size: 1.4rem;
+  }
+}
+
+/* ============================================================
+   10. Miscellaneous
+   ============================================================ */
+
+/* Org TODO keywords */
+.todo {
+  font-family: inherit;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #ff4444;
+  text-shadow: 0 0 6px rgba(255, 68, 68, 0.3);
+  background: none;
+  padding: 0;
+}
+
+.done {
+  font-family: inherit;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: var(--fg-bright);
+  text-shadow: 0 0 6px var(--glow);
+  background: none;
+  padding: 0;
+}
+
+/* Org tags */
+.tag {
+  font-family: inherit;
+  font-size: 0.7em;
+  background-color: var(--badge-bg);
+  color: var(--badge-fg);
+  padding: 0.1em 0.3em;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+
+/* Inline verbatim/code */
+code {
+  color: var(--fg-bright);
+}
+
+/* Org src container wrapper */
+.org-src-container {
+  margin: 1rem 0;
+}
+
+.org-src-container > pre {
+  margin: 0;
+}
+
+/* Remove excessive top margin on first child */
+.outline-text-2 > :first-child,
+.outline-text-3 > :first-child {
+  margin-top: 0;
+}
+
+.outline-2:first-of-type h2 {
+  margin-top: 0;
+}
+
+/* Subtle CRT scanline overlay on the whole page */
+body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 3px,
+    rgba(0, 0, 0, 0.015) 3px,
+    rgba(0, 0, 0, 0.015) 6px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Cursor blink animation for title */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+h1.title::after {
+  content: "_";
+  animation: blink 1s step-end infinite;
+  color: var(--fg-bright);
+}
+
+/* Selection color */
+::selection {
+  background: #00ff4130;
+  color: var(--fg-bright);
+}

@@ -95,9 +95,9 @@ Returns plist (:endpoint :headers :payload)."
     :body (plist-get request :payload)
     :as 'string
     :then (lambda (resp)
-            (funcall callback resp))
+            (funcall callback (cons t resp)))
     :else (lambda (err)
-            (message "org-dialog request failed: %s" err))))
+	    (funcall callback (cons nil err)))))
 
 (defun org-dialog--insert-assistant-after-prompt (buffer prompt-end content)
   "Insert or replace ASSISTANT block after PROMPT in BUFFER."
@@ -120,6 +120,24 @@ Returns plist (:endpoint :headers :payload)."
 		(unless (string-suffix-p "\n" content) "\n")
 		"#+end_assistant\n")))))
 
+(defun org-dialog--insert-assistant-placeholder (buffer prompt-end)
+  "Insert placeholder ASSISTANT block and return marker to its contents."
+  (with-current-buffer buffer
+    (let ((end (copy-marker prompt-end))
+          (marker (make-marker)))
+      (save-excursion
+        (goto-char end)
+        (skip-chars-forward " \t\r\n")
+        (delete-region end (point))
+        (insert "\n\n#+begin_assistant\n"
+                (format "Working... started %s\n" (org-dialog--timestamp))
+                "#+end_assistant\n")
+        (set-marker marker
+                    (save-excursion
+                      (search-backward "#+begin_assistant")
+                      (line-beginning-position 2))))
+      marker)))
+
 (defun org-dialog-execute-prompt ()
   "Execute PROMPT block at point and insert ASSISTANT response."
   (interactive)
@@ -135,25 +153,86 @@ Returns plist (:endpoint :headers :payload)."
 	   (buffer (current-buffer))
 	   (messages (org-dialog--collect-messages prompt-end))
 	   (config (org-dialog--collect-keywords))
-	   (request (org-dialog--prepare-request messages config)))
+	   (request (org-dialog--prepare-request messages config))
+	   (assistant-marker
+	    (org-dialog--insert-assistant-placeholder buffer prompt-end)))
       (org-dialog--execute-request
        request
-       (lambda (resp)
-	 (let* ((json (json-parse-string resp :object-type 'alist))
-		(choices (alist-get 'choices json))
-		(msg (alist-get 'message (aref choices 0)))
-		(content (alist-get 'content msg))
+       (lambda (result)
+	 (let* ((ok (car result))
+		(payload (cdr result))
 		(final
-		 (if debug
-		     (format "Response:\n%s\n\nRequest:\n%s"
-			     resp (plist-get request :payload))
-		   content)))
-	   (org-dialog--insert-assistant-after-prompt
-	    buffer prompt-end final)))))))
+		 (if ok
+		     (let* ((json (json-parse-string payload :object-type 'alist))
+			    (choices (alist-get 'choices json))
+			    (msg (alist-get 'message (aref choices 0)))
+			    (content (alist-get 'content msg)))
+		       (if debug
+			   (format "Response:\n%s\n\nRequest:\n%s"
+				   payload
+				   (plist-get request :payload))
+			 content))
+		   (format "Request failed:\n\n%s" payload))))
+		 (org-dialog--insert-assistant-after-prompt
+		  buffer prompt-end final)))))))
 
 (defun org-dialog--prompt-debug-p (block)
   (let ((params (org-element-property :parameters block)))
     (and params (string-match-p ":debug\\s-+yes" params))))
+
+(defgroup org-dialog nil
+      "Visual tweaks for org-dialog."
+      :group 'org)
+
+    (defcustom org-dialog-assistant-indent 2
+      "Indentation width for ASSISTANT blocks."
+      :type 'integer)
+
+    (defface org-dialog-assistant-face
+      '((t :foreground "#b5e890"))
+      "Face for ASSISTANT block contents.")
+
+(defun org-dialog--fontify-assistant (limit)
+  "Search for ASSISTANT block content up to LIMIT for font-lock."
+  (when (re-search-forward "^#\\+begin_assistant[ \t]*\n" limit t)
+    (let ((cbeg (point)))
+      (when (re-search-forward "^#\\+end_assistant" limit t)
+        (let ((cend (line-beginning-position)))
+          (add-text-properties
+           cbeg cend
+           `(line-prefix ,(make-string org-dialog-assistant-indent ?\s)
+             wrap-prefix ,(make-string org-dialog-assistant-indent ?\s)))
+          (set-match-data (list cbeg cend))
+          t)))))
+
+(defun org-dialog--extend-region ()
+  "Extend font-lock region to cover full ASSISTANT blocks."
+  (let ((changed nil))
+    (save-excursion
+      (goto-char font-lock-beg)
+      (when (re-search-backward "^#\\+begin_assistant" nil t)
+        (when (< (point) font-lock-beg)
+          (setq font-lock-beg (point) changed t))))
+    (save-excursion
+      (goto-char font-lock-end)
+      (when (re-search-forward "^#\\+end_assistant" nil t)
+        (when (> (point) font-lock-end)
+          (setq font-lock-end (point) changed t))))
+    changed))
+
+(defun org-dialog--enable-font-lock ()
+  (setq-local font-lock-multiline t)
+  (add-hook 'font-lock-extend-region-functions #'org-dialog--extend-region nil t)
+  (font-lock-add-keywords
+   nil
+   '((org-dialog--fontify-assistant 0 'org-dialog-assistant-face prepend))
+   'append)
+  (font-lock-flush))
+
+(add-hook 'org-dialog-mode-hook #'org-dialog--enable-font-lock)
+
+(defun org-dialog--timestamp ()
+  (format-time-string "%Y-%m-%d %H:%M:%S"))
 
 (defvar org-dialog-mode-map
   (let ((map (make-sparse-keymap)))

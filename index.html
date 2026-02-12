@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>org-dialog - AI Prompts in Org Mode</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #f0f0f0;
+            font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", "DejaVu Sans Mono", monospace;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .emacs-window {
+            width: 900px;
+            height: 500px;
+            background: #fff;
+            border: 1px solid #999;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .title-bar {
+            background: #d4d4d4;
+            padding: 6px 12px;
+            font-size: 13px;
+            color: #333;
+            text-align: center;
+            border-bottom: 1px solid #bbb;
+            font-weight: 500;
+        }
+        .buffer {
+            flex: 1;
+            padding: 16px 20px;
+            color: #333;
+            font-size: 14px;
+            line-height: 1.7;
+            overflow: auto;
+            background: #fff;
+        }
+        /* Org-mode colors - light theme */
+        .org-level-1 {
+            color: #000;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .org-timestamp {
+            color: #2980b9;
+        }
+        .org-keyword {
+            color: #3498db;
+        }
+        .org-document-info {
+            color: #8e44ad;
+        }
+        .org-block-end {
+            color: #3498db;
+        }
+
+        .prompt-block,
+        .assistant-block {
+            margin: 2px 0;
+        }
+        .prompt-label,
+        .assistant-label,
+        .org-block-end {
+            color: #3498db;
+            font-size: 14px;
+        }
+        .prompt-content,
+        .assistant-content {
+            color: #333;
+            white-space: pre-wrap;
+            margin: 0;
+            display: inline;
+        }
+
+        /* Minibuffer at bottom */
+        .minibuffer-area {
+            border-top: 1px solid #bbb;
+            background: #fff;
+        }
+        .minibuffer-window {
+            background: #fff;
+            padding: 4px 12px;
+            font-size: 14px;
+            min-height: 28px;
+            display: flex;
+            align-items: center;
+            color: #333;
+        }
+        .minibuffer-prompt {
+            color: #e74c3c;
+            margin-right: 4px;
+        }
+        .minibuffer-input {
+            color: #333;
+        }
+        .minibuffer-completion {
+            color: #bdc3c7;
+        }
+        
+        /* Mode line */
+        .mode-line {
+            background: #d4d4d4;
+            padding: 4px 12px;
+            font-size: 13px;
+            color: #333;
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid #bbb;
+        }
+        .mode-line-modified {
+            color: #e74c3c;
+        }
+        .mode-line-buffer {
+            color: #2980b9;
+        }
+        .mode-line-position {
+            color: #7f8c8d;
+        }
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 17px;
+            background: #333;
+            animation: blink 1.2s step-end infinite;
+            vertical-align: text-bottom;
+            margin-left: 1px;
+        }
+        .cursor.hidden {
+            opacity: 0;
+        }
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+        .hidden {
+            opacity: 0;
+        }
+        
+        .line {
+            margin: 2px 0;
+        }
+        .blank-line {
+            height: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="emacs-window">
+        <div class="title-bar">notes.org</div>
+        
+        <div class="buffer">
+            <!-- Document header -->
+            <div class="line"><span class="org-document-info">#+TITLE:</span> Project Notes & AI Prompts</div>
+            <div class="line"><span class="org-document-info">#+AUTHOR:</span> You!</div>
+            <div class="line"><span class="org-document-info">#+DATE:</span> <span class="org-timestamp">2026-02-11</span></div>
+            <div class="blank-line"></div>
+            
+            <div class="line">AI prompt execution inside Emacs org-mode.</div>
+            <div class="blank-line"></div>
+            
+            <!-- Prompt block -->
+            <div class="prompt-block" id="promptBlockContainer">
+                <div class="prompt-label">#+begin_prompt</div>
+                <div class="prompt-content-wrapper">
+                    <span class="prompt-content" id="typedPrompt"></span><span class="cursor" id="promptCursor"></span>
+                </div>
+                <div class="org-block-end">#+end_prompt</div>
+            </div>
+
+            <!-- Assistant block (hidden initially) -->
+            <div class="assistant-block hidden" id="assistantSection">
+                <div class="assistant-label">#+begin_assistant</div>
+                <div class="assistant-content-wrapper">
+                    <span class="assistant-content" id="typedAssistant"></span><span class="cursor" id="assistantCursor"></span>
+                </div>
+                <div class="org-block-end">#+end_assistant</div>
+            </div>
+        </div>
+        
+        <!-- Minibuffer area at bottom -->
+        <div class="minibuffer-area">
+            <div class="minibuffer-window" id="minibuffer">
+                <span id="minibufferContent"></span>
+                <span class="cursor hidden" id="typingCursor"></span>
+            </div>
+        </div>
+        
+        <!-- Mode line -->
+        <div class="mode-line">
+            <span class="mode-line-left">
+                <span class="mode-line-modified">-</span>
+                <span class="mode-line-modified">UUU:</span>
+                <span class="mode-line-modified">%%</span>-- 
+                <span class="mode-line-buffer">notes.org</span> 
+                <span class="mode-line-position">(Org)</span>
+            </span>
+            <span class="mode-line-right">
+                L9 <span class="mode-line-position">C1</span> 
+                <span class="mode-line-position">(Org Indent)</span>
+            </span>
+        </div>
+    </div>
+
+    <script>
+        const prompts = [
+            "What are the key benefits of using org-mode for project management?",
+            "Write a haiku about Emacs",
+            "Explain the difference between lists and vectors in Clojure",
+            "Suggest a good color theme for programming" 
+        ];
+        
+        const assistants = [
+            "Org-mode excels at project management through hierarchical structure, TODO states, tags/properties, time tracking, agenda views, and plain text portability.",
+            "Buffers flow like streams\nParentheses dance in the night\nCtrl-x, Ctrl-c saves",
+            "Lists: O(n) access, fast prepend/append. Vectors: O(1) indexed access. Use lists for sequential processing, vectors for indexed lookup.",
+            "Try Doom-One (modern dark), Modus themes (accessible), Dracula (vibrant), or Solarized (easy on eyes)."
+        ];
+        
+        let currentIndex = 0;
+        let animationRunning = false;
+        
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+        
+        async function typeText(textElement, text, cursor, speed = 35) {
+            if (!cursor || !textElement) return;
+            
+            cursor.classList.remove('hidden');
+            
+            for (let i = 0; i < text.length; i++) {
+                // Insert text node before the cursor
+                const charNode = document.createTextNode(text[i]);
+                textElement.parentNode.insertBefore(charNode, cursor);
+                
+                if (text[i] === '\n') {
+                    await sleep(speed * 2);
+                } else {
+                    await sleep(speed + Math.random() * 15);
+                }
+            }
+            
+            cursor.classList.add('hidden');
+        }
+        
+        async function typeMinibuffer(cmd) {
+            const mb = document.getElementById('minibufferContent');
+            const cursor = document.getElementById('typingCursor');
+            
+            if (!mb || !cursor) return;
+            
+            // Start with M-x prompt
+            mb.innerHTML = '<span class="minibuffer-prompt">M-x</span> ';
+            cursor.classList.remove('hidden');
+            await sleep(200);
+            
+            // Type the command with completion
+            let typed = '';
+            for (let i = 0; i < cmd.length; i++) {
+                typed += cmd[i];
+                
+                // Show partial completion hint
+                if (typed === 'org-dialog-') {
+                    mb.innerHTML = '<span class="minibuffer-prompt">M-x</span> <span class="minibuffer-input">' + 
+                                   typed + '</span><span class="minibuffer-completion">execute-prompt</span>';
+                } else if (typed.startsWith('org-dialog-')) {
+                    const remainder = 'execute-prompt'.substring(typed.length - 'org-dialog-'.length);
+                    mb.innerHTML = '<span class="minibuffer-prompt">M-x</span> <span class="minibuffer-input">' + 
+                                   typed + '</span><span class="minibuffer-completion">' + remainder + '</span>';
+                } else {
+                    mb.innerHTML = '<span class="minibuffer-prompt">M-x</span> <span class="minibuffer-input">' + typed + '</span>';
+                }
+                await sleep(40 + Math.random() * 20);
+            }
+            await sleep(200);
+            cursor.classList.add('hidden');
+        }
+        
+        async function clearMinibuffer() {
+            const mb = document.getElementById('minibufferContent');
+            if (mb) mb.innerHTML = '';
+        }
+        
+        async function showMinibufferMessage(msg) {
+            const mb = document.getElementById('minibufferContent');
+            if (mb) {
+                mb.innerHTML = '<span style="color: #27ae60;">✓</span> <span style="color: #333;">' + msg + '</span>';
+            }
+            await sleep(1200);
+            await clearMinibuffer();
+        }
+        
+        async function resetAnimation() {
+            const typedPrompt = document.getElementById('typedPrompt');
+            const typedAssistant = document.getElementById('typedAssistant');
+            const promptCursor = document.getElementById('promptCursor');
+            const assistantCursor = document.getElementById('assistantCursor');
+            const assistantSection = document.getElementById('assistantSection');
+            
+            // Clear typed content (keep cursor elements intact)
+            if (typedPrompt) typedPrompt.textContent = '';
+            if (typedAssistant) typedAssistant.textContent = '';
+            
+            // Hide cursors
+            if (promptCursor) promptCursor.classList.add('hidden');
+            if (assistantCursor) assistantCursor.classList.add('hidden');
+            if (assistantSection) assistantSection.classList.add('hidden');
+            
+            await clearMinibuffer();
+        }
+        
+        async function runAnimation() {
+            if (animationRunning) return;
+            animationRunning = true;
+            
+            try {
+                await resetAnimation();
+                
+                // Get fresh references to avoid stale elements
+                const typedPrompt = document.getElementById('typedPrompt');
+                const promptCursor = document.getElementById('promptCursor');
+                
+                // Type the prompt content
+                await typeText(
+                    typedPrompt,
+                    prompts[currentIndex],
+                    promptCursor,
+                    30
+                );
+                
+                await sleep(600);
+                
+                // Type the M-x command in the minibuffer
+                await typeMinibuffer('org-dialog-execute-prompt');
+                
+                await sleep(400);
+                
+                // Execute - show message and clear minibuffer
+                await showMinibufferMessage('Querying LLM...');
+                
+                const mb = document.getElementById('minibufferContent');
+                if (mb) {
+                    mb.innerHTML = '<span style="color: #f39c12;">⏳ Sending request...</span>';
+                }
+                await sleep(800);
+                
+                // Show processing message
+                if (mb) {
+                    mb.innerHTML = '<span style="color: #27ae60;">⏳ Receiving response...</span>';
+                }
+                await sleep(300);
+
+                // Reveal assistant block
+                const assistantSection = document.getElementById('assistantSection');
+                if (assistantSection) assistantSection.classList.remove('hidden');
+
+                const typedAssistant = document.getElementById('typedAssistant');
+                const assistantCursor = document.getElementById('assistantCursor');
+                
+                await typeText(
+                    typedAssistant,
+                    assistants[currentIndex],
+                    assistantCursor,
+                    15  // Faster for LLM response
+                );
+                
+                await clearMinibuffer();
+                
+                // Pause to read, then loop
+                await sleep(4000);
+                
+                // Move to next
+                currentIndex = (currentIndex + 1) % prompts.length;
+                
+            } catch (err) {
+                console.error('Animation error:', err);
+            } finally {
+                animationRunning = false;
+                // Continue looping unconditionally
+                runAnimation();
+            }
+        }
+        
+        // Start animation unconditionally on load
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', runAnimation);
+        } else {
+            runAnimation();
+        }
+    </script>
+</body>
+</html>
